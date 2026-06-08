@@ -233,6 +233,27 @@ def init_session_state():
     
     if 'optimization_color_by' not in st.session_state:
         st.session_state.optimization_color_by = 'sludge'
+    
+    if 'optimization_current_gen' not in st.session_state:
+        st.session_state.optimization_current_gen = 0
+    
+    if 'optimization_max_gen' not in st.session_state:
+        st.session_state.optimization_max_gen = 100
+    
+    if 'optimization_best_fitness' not in st.session_state:
+        st.session_state.optimization_best_fitness = 0.0
+    
+    if 'optimization_avg_fitness' not in st.session_state:
+        st.session_state.optimization_avg_fitness = 0.0
+    
+    if 'optimization_status' not in st.session_state:
+        st.session_state.optimization_status = ""
+    
+    if 'optimization_config_copy' not in st.session_state:
+        st.session_state.optimization_config_copy = None
+    
+    if 'optimization_error' not in st.session_state:
+        st.session_state.optimization_error = None
 
 
 def page_home():
@@ -2519,27 +2540,22 @@ def page_multiobjective_optimization():
             elif len(opt_config.objectives) == 0:
                 st.error("请至少选择一个优化目标！")
             else:
+                opt_config_copy = copy.deepcopy(opt_config)
+                opt_config_copy.population_size = int(pop_size)
+                opt_config_copy.max_generations = int(max_gen)
+                
                 st.session_state.optimization_running = True
                 st.session_state.optimization_aborted = False
                 st.session_state.optimization_progress = 0.0
                 st.session_state.optimization_result = None
-                
-                progress_bar = st.progress(0.0)
-                status_text = st.empty()
-                gen_info = st.empty()
-                
-                def progress_callback(current_gen, max_gen, best_fitness, avg_fitness):
-                    progress = current_gen / max_gen if max_gen > 0 else 0
-                    st.session_state.optimization_progress = progress
-                    progress_bar.progress(min(progress, 1.0))
-                    status_text.text(f"迭代 {current_gen}/{max_gen} | 最优适应度: {best_fitness:.2f} | 平均: {avg_fitness:.2f}")
-                    gen_info.info(f"🔄 正在进行第 {current_gen} 代进化...")
-                
-                def stop_check():
-                    return st.session_state.optimization_aborted
+                st.session_state.optimization_current_gen = 0
+                st.session_state.optimization_max_gen = opt_config_copy.max_generations
+                st.session_state.optimization_best_fitness = 0.0
+                st.session_state.optimization_avg_fitness = 0.0
+                st.session_state.optimization_status = "初始化中..."
                 
                 optimizer = NSGA2Optimizer(
-                    config=opt_config,
+                    config=opt_config_copy,
                     pfs=st.session_state.pfs,
                     influent=st.session_state.influent,
                     asm1_params=st.session_state.asm1_params,
@@ -2547,27 +2563,38 @@ def page_multiobjective_optimization():
                 )
                 
                 st.session_state.optimization_optimizer = optimizer
+                st.session_state.optimization_config_copy = opt_config_copy
                 
-                with st.spinner("NSGA-II多目标优化进行中... (可随时点击终止按钮)"):
+                import threading
+                
+                def run_optimization():
+                    def progress_callback(current_gen, max_gen, best_fitness, avg_fitness):
+                        progress = current_gen / max_gen if max_gen > 0 else 0
+                        st.session_state.optimization_progress = progress
+                        st.session_state.optimization_current_gen = current_gen
+                        st.session_state.optimization_max_gen = max_gen
+                        st.session_state.optimization_best_fitness = best_fitness
+                        st.session_state.optimization_avg_fitness = avg_fitness
+                        st.session_state.optimization_status = f"迭代 {current_gen}/{max_gen} | 最优: {best_fitness:.2f} | 平均: {avg_fitness:.2f}"
+                    
+                    def stop_check():
+                        return st.session_state.optimization_aborted
+                    
                     try:
                         result = optimizer.optimize(
                             progress_callback=progress_callback,
                             stop_check_callback=stop_check,
                         )
                         st.session_state.optimization_result = result
-                        
-                        if result.was_aborted:
-                            st.warning(f"优化已提前终止，完成 {len(result.all_populations)-1}/{max_gen} 代")
-                        else:
-                            st.success(f"🎉 优化完成！共评估 {result.total_evaluations} 个方案，"
-                                      f"获得 {len(result.pareto_front)} 个Pareto最优解")
+                        st.session_state.optimization_status = "优化完成！"
                     except Exception as e:
-                        st.error(f"优化过程出错: {str(e)}")
+                        st.session_state.optimization_error = str(e)
+                        st.session_state.optimization_status = f"出错: {str(e)}"
+                    finally:
+                        st.session_state.optimization_running = False
                 
-                st.session_state.optimization_running = False
-                progress_bar.progress(1.0)
-                status_text.text("优化完成！")
-                gen_info.empty()
+                optimization_thread = threading.Thread(target=run_optimization, daemon=True)
+                optimization_thread.start()
                 st.rerun()
     
     with col_stop:
@@ -2582,16 +2609,31 @@ def page_multiobjective_optimization():
     
     with col_status:
         if st.session_state.optimization_running:
-            st.info(f"🔄 优化进行中... ({st.session_state.optimization_progress*100:.1f}%)")
+            progress = st.session_state.optimization_progress
+            current_gen = st.session_state.get('optimization_current_gen', 0)
+            max_gen = st.session_state.get('optimization_max_gen', opt_config.max_generations)
+            best_fitness = st.session_state.get('optimization_best_fitness', 0.0)
+            avg_fitness = st.session_state.get('optimization_avg_fitness', 0.0)
+            status = st.session_state.get('optimization_status', '初始化中...')
+            
+            st.progress(min(progress, 1.0))
+            st.info(f"🔄 {status}")
+            
+            import time
+            time.sleep(0.5)
+            st.rerun()
         elif st.session_state.optimization_result is not None:
-            if st.session_state.optimization_result.was_aborted:
-                st.warning("⚠️ 优化已提前终止")
+            result = st.session_state.optimization_result
+            if result.was_aborted:
+                st.warning(f"⚠️ 优化已提前终止，完成 {len(result.all_populations)-1}/{st.session_state.optimization_max_gen} 代")
             else:
-                st.success("✅ 优化已完成")
+                st.success(f"✅ 优化完成！共评估 {result.total_evaluations} 个方案，获得 {len(result.pareto_front)} 个Pareto最优解")
+        elif 'optimization_error' in st.session_state and st.session_state.optimization_error is not None:
+            st.error(f"❌ 优化出错: {st.session_state.optimization_error}")
     
     if st.session_state.optimization_running:
         st.info("💡 优化过程中每代需要对种群中每个个体调用稳态求解器进行仿真计算，"
-                "种群50、迭代100代约需要5-10分钟，请耐心等待。")
+                "种群50、迭代100代约需要5-10分钟，请耐心等待。可随时点击终止按钮停止优化。")
     
     if st.session_state.optimization_result is not None:
         result = st.session_state.optimization_result
