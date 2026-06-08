@@ -42,9 +42,9 @@ from src.solver import (
     SolverConfig,
     SteadyStateResult,
     DynamicResult,
+    DynamicSimulator,
     solve_steady_state,
     run_dynamic_simulation,
-    DynamicSimulator,
 )
 from src.analysis import (
     STANDARDS,
@@ -106,6 +106,21 @@ def init_session_state():
     
     if 'sensitivity_result' not in st.session_state:
         st.session_state.sensitivity_result = None
+    
+    if 'selected_hour' not in st.session_state:
+        st.session_state.selected_hour = 8
+    
+    if 'simulation_running' not in st.session_state:
+        st.session_state.simulation_running = False
+    
+    if 'simulation_paused' not in st.session_state:
+        st.session_state.simulation_paused = False
+    
+    if 'simulation_aborted' not in st.session_state:
+        st.session_state.simulation_aborted = False
+    
+    if 'simulation_progress' not in st.session_state:
+        st.session_state.simulation_progress = 0.0
     
     if 'two_factor_result' not in st.session_state:
         st.session_state.two_factor_result = None
@@ -387,7 +402,7 @@ def page_process_config():
                     reactor.operation.HRT = new_hrt
                     reactor.operation.SRT = new_srt
                 
-                col_act1, col_act2 = st.columns(2)
+                col_act1, col_act2, col_act3 = st.columns(3)
                 with col_act1:
                     if st.button("⬆️ 上移", key=f"up_{idx}", disabled=(idx == 0)):
                         if idx > 0:
@@ -398,13 +413,37 @@ def page_process_config():
                         if idx < len(pfs.reactors) - 1:
                             pfs.reactors[idx+1], pfs.reactors[idx] = pfs.reactors[idx], pfs.reactors[idx+1]
                             st.rerun()
+                with col_act3:
+                    if st.button("❌ 删除", key=f"del_{idx}"):
+                        pfs.reactors.pop(idx)
+                        pfs.connections = []
+                        for i in range(len(pfs.reactors) - 1):
+                            pfs.connect(i, i + 1)
+                        st.rerun()
                 
-                if st.button("❌ 删除", key=f"del_{idx}"):
-                    pfs.reactors.pop(idx)
-                    pfs.connections = []
-                    for i in range(len(pfs.reactors) - 1):
-                        pfs.connect(i, i + 1)
-                    st.rerun()
+                if len(pfs.reactors) > 2:
+                    col_move, col_pos, col_go = st.columns([2, 1, 1])
+                    with col_move:
+                        target_pos = st.selectbox(
+                            "移动到",
+                            [f"第{i+1}位" for i in range(len(pfs.reactors))],
+                            index=idx,
+                            key=f"pos_{idx}",
+                            label_visibility="collapsed",
+                        )
+                    with col_pos:
+                        pass
+                    with col_go:
+                        if st.button("→ 移动", key=f"move_{idx}"):
+                            target_idx = int(target_pos.replace("第", "").replace("位", "")) - 1
+                            if target_idx != idx:
+                                reactor = pfs.reactors.pop(idx)
+                                pfs.reactors.insert(target_idx, reactor)
+                                pfs.connections = []
+                                for i in range(len(pfs.reactors) - 1):
+                                    pfs.connect(i, i + 1)
+                                st.success(f"✅ 已将「{reactor.name}」从第{idx+1}位移到第{target_idx+1}位")
+                                st.rerun()
         
         total_volume = pfs.get_volume()
         Q = st.session_state.influent.Q_base
@@ -528,13 +567,96 @@ def page_influent_config():
         
         adjust_mode = st.radio(
             "调整方式",
-            ["关键节点调整", "逐小时精细调整"],
+            ["🎯 可视化节点编辑", "🔧 关键节点调整", "⏰ 逐小时精细调整"],
             horizontal=True,
             label_visibility="collapsed",
         )
         
-        if adjust_mode == "关键节点调整":
-            st.markdown("**🎛️ 关键节点调整** (拖拽调整主要时段，中间时段自动插值)")
+        if adjust_mode == "🎯 可视化节点编辑":
+            st.markdown("**🎯 可视化节点编辑** (点击小时按钮选择节点，拖拽滑块实时调整曲线)")
+            
+            st.markdown("**选择要编辑的时间点**:")
+            hour_cols = st.columns(12)
+            for h in range(24):
+                with hour_cols[h % 12]:
+                    btn_label = f"{'●' if st.session_state.selected_hour == h else '○'} {h:02d}"
+                    if st.button(btn_label, key=f"sel_hour_{h}", 
+                                type="primary" if st.session_state.selected_hour == h else "secondary",
+                                use_container_width=True):
+                        st.session_state.selected_hour = h
+                        st.rerun()
+            
+            st.markdown("---")
+            
+            selected_h = st.session_state.selected_hour
+            st.info(f"📌 当前选中: **{selected_h:02d}:00** - 拖拽下方滑块调整该时间点的流量和浓度，曲线实时更新")
+            
+            col_flow, col_conc = st.columns(2)
+            
+            with col_flow:
+                st.markdown(f"**🌊 流量系数 - {selected_h:02d}:00**")
+                current_flow = float(influent.diurnal_flow_curve[selected_h])
+                new_flow = st.slider(
+                    f"调整 {selected_h:02d}:00 流量系数",
+                    min_value=0.5, max_value=2.0,
+                    value=current_flow,
+                    step=0.01,
+                    key=f"vis_flow_{selected_h}",
+                    label_visibility="collapsed",
+                )
+                influent.diurnal_flow_curve[selected_h] = new_flow
+                
+                smooth_nearby = st.checkbox(
+                    "平滑相邻时段",
+                    value=True,
+                    key=f"smooth_flow_{selected_h}",
+                    help="自动平滑调整点前后1小时的系数，使曲线更自然"
+                )
+                if smooth_nearby:
+                    prev_h = (selected_h - 1) % 24
+                    next_h = (selected_h + 1) % 24
+                    influent.diurnal_flow_curve[prev_h] = 0.7 * influent.diurnal_flow_curve[prev_h] + 0.3 * new_flow
+                    influent.diurnal_flow_curve[next_h] = 0.7 * influent.diurnal_flow_curve[next_h] + 0.3 * new_flow
+            
+            with col_conc:
+                st.markdown(f"**🔬 浓度系数 - {selected_h:02d}:00**")
+                current_conc = float(influent.diurnal_curve[selected_h])
+                new_conc = st.slider(
+                    f"调整 {selected_h:02d}:00 浓度系数",
+                    min_value=0.5, max_value=2.0,
+                    value=current_conc,
+                    step=0.01,
+                    key=f"vis_conc_{selected_h}",
+                    label_visibility="collapsed",
+                )
+                influent.diurnal_curve[selected_h] = new_conc
+                
+                smooth_nearby_c = st.checkbox(
+                    "平滑相邻时段",
+                    value=True,
+                    key=f"smooth_conc_{selected_h}",
+                    help="自动平滑调整点前后1小时的系数，使曲线更自然"
+                )
+                if smooth_nearby_c:
+                    prev_h = (selected_h - 1) % 24
+                    next_h = (selected_h + 1) % 24
+                    influent.diurnal_curve[prev_h] = 0.7 * influent.diurnal_curve[prev_h] + 0.3 * new_conc
+                    influent.diurnal_curve[next_h] = 0.7 * influent.diurnal_curve[next_h] + 0.3 * new_conc
+            
+            st.markdown("**📈 实时曲线预览** (红色标记为当前选中节点)")
+            fig = plot_influent_diurnal(influent, selected_hour=st.session_state.selected_hour, 
+                                       show_editable_hint=False)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.success(f"""
+            **当前 {selected_h:02d}:00 数值:**
+            - 流量系数: {new_flow:.2f} (流量: {new_flow * influent.Q_base:.0f} m³/d)
+            - 浓度系数: {new_conc:.2f}
+            {f'- 相邻时段已平滑' if smooth_nearby or smooth_nearby_c else ''}
+            """)
+        
+        elif adjust_mode == "🔧 关键节点调整":
+            st.markdown("**🔧 关键节点调整** (拖拽调整主要时段，中间时段自动插值)")
             
             key_hours = [0, 6, 9, 12, 15, 18, 21]
             key_hours_labels = ["00:00", "06:00", "09:00", "12:00", "15:00", "18:00", "21:00"]
@@ -1093,34 +1215,99 @@ def page_dynamic():
     if st.session_state.influent.flow_mode == 'constant':
         st.info("💡 当前进水为恒定模式，建议切换到日变化模式以观察动态响应")
     
-    col_run, col_stop = st.columns(2)
+    col_run, col_pause, col_stop = st.columns(3)
     
     with col_run:
-        if st.button("▶️ 开始动态仿真", type="primary", use_container_width=True):
-            initial_states = None
-            if st.session_state.steady_result is not None and st.session_state.steady_result.converged:
-                initial_states = st.session_state.steady_result.reactor_states
-                st.info("使用稳态解作为初始条件")
-            
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            status_text.text("正在仿真...")
-            with st.spinner("动态仿真进行中..."):
-                result = run_dynamic_simulation(
-                    st.session_state.pfs,
-                    st.session_state.influent,
-                    st.session_state.asm1_params,
-                    initial_states=initial_states,
-                    config=config,
-                )
-                st.session_state.dynamic_result = result
-                progress_bar.progress(1.0)
-            
-            if result.success:
-                st.success("仿真完成！")
+        if st.button("▶️ 开始仿真", type="primary", use_container_width=True,
+                    disabled=st.session_state.simulation_running and not st.session_state.simulation_paused):
+            if not st.session_state.simulation_running:
+                st.session_state.simulation_running = True
+                st.session_state.simulation_paused = False
+                st.session_state.simulation_aborted = False
+                st.session_state.simulation_progress = 0.0
+                
+                initial_states = None
+                if st.session_state.steady_result is not None and st.session_state.steady_result.converged:
+                    initial_states = st.session_state.steady_result.reactor_states
+                    st.info("使用稳态解作为初始条件")
+                
+                progress_bar = st.progress(0.0)
+                status_text = st.empty()
+                chart_placeholder = st.empty()
+                
+                def stop_check():
+                    return st.session_state.simulation_aborted
+                
+                def pause_check():
+                    return st.session_state.simulation_paused
+                
+                def progress_callback(progress):
+                    st.session_state.simulation_progress = progress
+                    progress_bar.progress(progress)
+                    status_text.text(f"正在仿真... {progress*100:.1f}%")
+                
+                status_text.text("正在仿真...")
+                with st.spinner("动态仿真进行中... (可暂停或终止)"):
+                    simulator = DynamicSimulator(
+                        st.session_state.pfs,
+                        st.session_state.influent,
+                        st.session_state.asm1_params,
+                        config
+                    )
+                    result = simulator.run(
+                        initial_states=initial_states,
+                        progress_callback=progress_callback,
+                        stop_check_callback=stop_check,
+                        pause_check_callback=pause_check,
+                        segment_days=0.5
+                    )
+                    st.session_state.dynamic_result = result
+                    progress_bar.progress(1.0)
+                
+                st.session_state.simulation_running = False
+                st.session_state.simulation_paused = False
+                
+                if result.success:
+                    if result.was_aborted:
+                        st.warning(f"仿真已终止: {result.message}")
+                    else:
+                        st.success("仿真完成！")
+                else:
+                    st.error(f"仿真失败: {result.message}")
+    
+    with col_pause:
+        if st.session_state.simulation_running:
+            if st.session_state.simulation_paused:
+                if st.button("▶️ 继续", type="secondary", use_container_width=True):
+                    st.session_state.simulation_paused = False
+                    st.rerun()
             else:
-                st.error(f"仿真失败: {result.message}")
+                if st.button("⏸️ 暂停", type="secondary", use_container_width=True):
+                    st.session_state.simulation_paused = True
+                    st.rerun()
+        else:
+            st.button("⏸️ 暂停", disabled=True, use_container_width=True)
+    
+    with col_stop:
+        if st.button("⏹️ 终止", type="secondary", use_container_width=True,
+                    disabled=not st.session_state.simulation_running):
+            st.session_state.simulation_aborted = True
+            st.session_state.simulation_running = False
+            st.session_state.simulation_paused = False
+            if st.session_state.dynamic_result is not None:
+                if len(st.session_state.dynamic_result.time_days) > 0:
+                    st.warning("已发送终止信号，当前仿真段完成后将停止")
+            st.rerun()
+    
+    if st.session_state.simulation_running:
+        if st.session_state.simulation_paused:
+            st.info(f"⏸️ 仿真已暂停 ({st.session_state.simulation_progress*100:.1f}%) - 点击继续按钮恢复")
+        else:
+            st.info(f"🔄 仿真进行中 ({st.session_state.simulation_progress*100:.1f}%) - 可点击暂停或终止按钮")
+    
+    if st.session_state.simulation_aborted and st.session_state.dynamic_result is not None:
+        if hasattr(st.session_state.dynamic_result, 'was_aborted') and st.session_state.dynamic_result.was_aborted:
+            st.warning(f"仿真已被用户终止，已完成 {len(st.session_state.dynamic_result.time_days)} 个时间步")
     
     if st.session_state.dynamic_result is not None:
         result = st.session_state.dynamic_result

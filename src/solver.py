@@ -4,6 +4,7 @@
 """
 
 import numpy as np
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Callable
 import copy
@@ -64,6 +65,7 @@ class DynamicResult:
     reactor_states: List[np.ndarray]
     effluent_quality_history: List[Dict[str, float]]
     message: str = ""
+    was_aborted: bool = False
 
 
 def calculate_system_residual(C_flat: np.ndarray, pfs: ProcessFlowSheet,
@@ -661,34 +663,30 @@ class DynamicSimulator:
         
         return dCdt_flat
     
-    def run(self, initial_states: Optional[List[np.ndarray]] = None,
-            progress_callback: Optional[Callable[[float], None]] = None) -> DynamicResult:
+    def run_segment(self, t_start: float, t_end: float, 
+                    C0: np.ndarray,
+                    progress_callback: Optional[Callable[[float], None]] = None) -> Tuple[bool, np.ndarray, np.ndarray, np.ndarray, str]:
         """
-        运行动态仿真
+        运行一段动态仿真（从t_start到t_end）
         
         参数:
-            initial_states: 初始状态，每个反应器的浓度
-            progress_callback: 进度回调(已仿真天数)
+            t_start: 开始时间 (天)
+            t_end: 结束时间 (天)
+            C0: 初始状态 (展平的数组)
+            progress_callback: 进度回调
         
         返回:
-            DynamicResult
+            (success, time_days, states, final_state, message)
         """
-        self._pause_event = False
-        self._stop_event = False
+        if self._stop_event:
+            return False, np.array([]), np.array([]), C0, "用户终止"
         
         num_reactors = len(self.pfs.reactors)
-        n = num_reactors * NUM_COMPONENTS
         
-        if initial_states is None:
-            C0 = np.zeros(n)
-            C_in = self.influent.get_C(0)
-            for i in range(num_reactors):
-                C0[i * NUM_COMPONENTS:(i + 1) * NUM_COMPONENTS] = C_in * 0.5
-        else:
-            C0 = np.concatenate(initial_states)
-        
-        t_span = (0, self.config.simulation_days)
-        t_eval = np.arange(0, self.config.simulation_days, self.config.output_interval_days)
+        t_span = (t_start, t_end)
+        t_eval = np.arange(t_start, t_end, self.config.output_interval_days)
+        if len(t_eval) == 0 or t_eval[-1] < t_end:
+            t_eval = np.append(t_eval, t_end)
         
         success = False
         message = ""
@@ -712,16 +710,110 @@ class DynamicSimulator:
             message = str(e)
         
         if not success:
+            return success, np.array([]), np.array([]), C0, message
+        
+        final_state = sol.y[:, -1]
+        
+        return success, sol.t, sol.y, final_state, message
+    
+    def run(self, initial_states: Optional[List[np.ndarray]] = None,
+            progress_callback: Optional[Callable[[float], None]] = None,
+            stop_check_callback: Optional[Callable[[], bool]] = None,
+            pause_check_callback: Optional[Callable[[], bool]] = None,
+            segment_days: float = 0.5) -> DynamicResult:
+        """
+        运行动态仿真（支持暂停/继续/终止）
+        
+        参数:
+            initial_states: 初始状态，每个反应器的浓度
+            progress_callback: 进度回调(已仿真天数)
+            stop_check_callback: 终止检查回调，返回True表示需要终止
+            pause_check_callback: 暂停检查回调，返回True表示需要暂停
+            segment_days: 每段仿真的天数，用于检查暂停/终止
+        
+        返回:
+            DynamicResult
+        """
+        self._pause_event = False
+        self._stop_event = False
+        
+        num_reactors = len(self.pfs.reactors)
+        n = num_reactors * NUM_COMPONENTS
+        
+        if initial_states is None:
+            C0 = np.zeros(n)
+            C_in = self.influent.get_C(0)
+            for i in range(num_reactors):
+                C0[i * NUM_COMPONENTS:(i + 1) * NUM_COMPONENTS] = C_in * 0.5
+        else:
+            C0 = np.concatenate(initial_states)
+        
+        current_time = 0.0
+        current_state = C0.copy()
+        
+        all_time_days = []
+        all_states = []
+        
+        success = True
+        message = "仿真完成"
+        was_aborted = False
+        
+        while current_time < self.config.simulation_days and success:
+            if stop_check_callback is not None and stop_check_callback():
+                success = False
+                message = "用户终止仿真"
+                was_aborted = True
+                break
+            
+            while pause_check_callback is not None and pause_check_callback():
+                if stop_check_callback is not None and stop_check_callback():
+                    success = False
+                    message = "用户终止仿真"
+                    was_aborted = True
+                    break
+                time.sleep(0.1)
+            
+            if was_aborted:
+                break
+            
+            next_time = min(current_time + segment_days, self.config.simulation_days)
+            
+            seg_success, seg_times, seg_states, final_state, seg_msg = self.run_segment(
+                current_time, next_time, current_state, progress_callback
+            )
+            
+            if not seg_success:
+                success = False
+                message = seg_msg
+                break
+            
+            if len(all_time_days) == 0:
+                all_time_days = seg_times
+                all_states = seg_states
+            else:
+                mask = seg_times > all_time_days[-1]
+                if np.any(mask):
+                    all_time_days = np.concatenate([all_time_days, seg_times[mask]])
+                    all_states = np.hstack([all_states, seg_states[:, mask]])
+            
+            current_time = next_time
+            current_state = final_state
+            
+            if progress_callback is not None:
+                progress_callback(current_time / self.config.simulation_days)
+        
+        if len(all_time_days) == 0:
             return DynamicResult(
                 success=False,
                 time_days=np.array([]),
                 reactor_states=[],
                 effluent_quality_history=[],
                 message=message,
+                was_aborted=was_aborted,
             )
         
-        time_days = sol.t
-        states = sol.y
+        time_days = all_time_days
+        states = all_states
         
         reactor_states = []
         for i in range(num_reactors):
@@ -735,11 +827,12 @@ class DynamicSimulator:
             effluent_history.append(aggregate_to_wq_indices(effluent_state))
         
         return DynamicResult(
-            success=True,
+            success=success,
             time_days=time_days,
             reactor_states=reactor_states,
             effluent_quality_history=effluent_history,
-            message="仿真完成",
+            message=message,
+            was_aborted=was_aborted,
         )
 
 

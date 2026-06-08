@@ -278,9 +278,16 @@ def plot_effluent_timeseries(dynamic_result: DynamicResult) -> go.Figure:
     return fig
 
 
-def plot_influent_diurnal(influent: InfluentConfig) -> go.Figure:
+def plot_influent_diurnal(influent: InfluentConfig, 
+                           selected_hour: Optional[int] = None,
+                           show_editable_hint: bool = False) -> go.Figure:
     """
-    绘制进水日变化曲线
+    绘制进水日变化曲线，支持高亮选中节点
+    
+    参数:
+        influent: 进水配置
+        selected_hour: 高亮显示的小时节点 (None表示不高亮)
+        show_editable_hint: 是否显示可编辑提示
     """
     hours = np.arange(24)
     
@@ -293,32 +300,69 @@ def plot_influent_diurnal(influent: InfluentConfig) -> go.Figure:
     
     fig = make_subplots(
         rows=2, cols=1,
-        subplot_titles=('进水流量日变化', '进水浓度日变化'),
+        subplot_titles=(
+            '进水流量日变化' + (' (点击下方小时按钮选择节点调整)' if show_editable_hint else ''),
+            '进水浓度日变化' + (' (拖拽滑块实时更新)' if show_editable_hint else '')
+        ),
         shared_xaxes=True,
         vertical_spacing=0.08,
     )
     
+    marker_sizes_flow = [8] * 24
+    marker_colors_flow = ['#1f77b4'] * 24
+    marker_sizes_conc = [8] * 24
+    marker_colors_conc = ['#2ca02c'] * 24
+    
+    if selected_hour is not None and 0 <= selected_hour < 24:
+        marker_sizes_flow[selected_hour] = 18
+        marker_colors_flow[selected_hour] = '#ff4b4b'
+        marker_sizes_conc[selected_hour] = 18
+        marker_colors_conc[selected_hour] = '#ff4b4b'
+    
     fig.add_trace(
         go.Scatter(x=hours, y=flow_values, mode='lines+markers',
                    fill='tozeroy', name='流量',
-                   line=dict(color='#1f77b4')),
+                   line=dict(color='#1f77b4', width=2),
+                   marker=dict(size=marker_sizes_flow, color=marker_colors_flow, 
+                               line=dict(color='white', width=1))),
         row=1, col=1,
     )
     
     fig.add_trace(
         go.Scatter(x=hours, y=conc_values, mode='lines+markers',
                    fill='tozeroy', name='浓度系数',
-                   line=dict(color='#2ca02c')),
+                   line=dict(color='#2ca02c', width=2),
+                   marker=dict(size=marker_sizes_conc, color=marker_colors_conc,
+                               line=dict(color='white', width=1))),
         row=2, col=1,
     )
     
-    fig.update_xaxes(title_text='时间 (小时)', row=2, col=1)
+    if selected_hour is not None and 0 <= selected_hour < 24:
+        fig.add_annotation(
+            x=selected_hour, y=flow_values[selected_hour],
+            text=f"<b>{selected_hour:02d}:00</b><br>{flow_values[selected_hour]:.0f}",
+            showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=2,
+            bgcolor='rgba(255,75,75,0.9)', font=dict(color='white'),
+            row=1, col=1
+        )
+        fig.add_annotation(
+            x=selected_hour, y=conc_values[selected_hour],
+            text=f"<b>{selected_hour:02d}:00</b><br>{conc_values[selected_hour]:.2f}",
+            showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=2,
+            bgcolor='rgba(255,75,75,0.9)', font=dict(color='white'),
+            row=2, col=1
+        )
+    
+    fig.update_xaxes(title_text='时间 (小时)', row=2, col=1, tickmode='array', 
+                     tickvals=list(range(0, 24, 2)))
     fig.update_yaxes(title_text='流量 (m³/day)', row=1, col=1)
     fig.update_yaxes(title_text='浓度系数', row=2, col=1)
     
     fig.update_layout(
-        height=500,
+        height=580,
         showlegend=False,
+        hovermode='x unified',
+        margin=dict(l=10, r=10, t=40, b=10),
     )
     
     return fig
