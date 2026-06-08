@@ -70,6 +70,21 @@ from src.visualization import (
     plot_srt_vs_sludge,
     plot_srt_vs_energy,
     plot_energy_pie,
+    plot_pareto_front,
+    plot_convergence_curve,
+    plot_objective_parallel_coordinates,
+)
+from src.nsga2_optimizer import (
+    NSGA2Optimizer,
+    OptimizationConfig,
+    OptimizationVariable,
+    OptimizationObjective,
+    Individual,
+    OptimizationResult,
+    DEFAULT_VARIABLES,
+    DEFAULT_OBJECTIVES,
+    get_default_config,
+    calculate_composite_score,
 )
 from src.analysis import (
     calculate_sludge_production,
@@ -194,6 +209,30 @@ def init_session_state():
     
     if 'comparison_name2' not in st.session_state:
         st.session_state.comparison_name2 = "方案2"
+    
+    if 'optimization_config' not in st.session_state:
+        st.session_state.optimization_config = get_default_config()
+    
+    if 'optimization_result' not in st.session_state:
+        st.session_state.optimization_result = None
+    
+    if 'optimization_running' not in st.session_state:
+        st.session_state.optimization_running = False
+    
+    if 'optimization_aborted' not in st.session_state:
+        st.session_state.optimization_aborted = False
+    
+    if 'optimization_progress' not in st.session_state:
+        st.session_state.optimization_progress = 0.0
+    
+    if 'optimization_optimizer' not in st.session_state:
+        st.session_state.optimization_optimizer = None
+    
+    if 'optimization_selected_solution' not in st.session_state:
+        st.session_state.optimization_selected_solution = None
+    
+    if 'optimization_color_by' not in st.session_state:
+        st.session_state.optimization_color_by = 'sludge'
 
 
 def page_home():
@@ -2309,6 +2348,523 @@ def page_optimization():
     st.dataframe(pd.DataFrame(summary_data), hide_index=True, use_container_width=True)
 
 
+def page_multiobjective_optimization():
+    """多目标工艺优化页面"""
+    st.title("🎯 多目标工艺优化 (NSGA-II)")
+    st.markdown("---")
+    
+    opt_config = st.session_state.optimization_config
+    
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.subheader("⚙️ 决策变量配置")
+        st.info("选择需要优化的决策变量及其取值范围")
+        
+        for i, var in enumerate(DEFAULT_VARIABLES):
+            with st.expander(f"📌 {var.display_name}", expanded=True):
+                col_min, col_max, col_enable = st.columns([1, 1, 1])
+                
+                with col_min:
+                    min_val = st.number_input(
+                        "最小值",
+                        min_value=var.min_value * 0.5,
+                        max_value=var.max_value,
+                        value=var.min_value,
+                        step=0.1 if var.unit == 'mg/L' else 1.0,
+                        key=f"opt_min_{i}",
+                    )
+                
+                with col_max:
+                    max_val = st.number_input(
+                        "最大值",
+                        min_value=var.min_value,
+                        max_value=var.max_value * 1.5,
+                        value=var.max_value,
+                        step=0.1 if var.unit == 'mg/L' else 1.0,
+                        key=f"opt_max_{i}",
+                    )
+                
+                with col_enable:
+                    enabled = st.checkbox(
+                        "启用优化",
+                        value=True,
+                        key=f"opt_enable_{i}",
+                    )
+                
+                if enabled:
+                    var.min_value = float(min_val)
+                    var.max_value = float(max_val)
+                    if var not in opt_config.variables:
+                        opt_config.variables.append(var)
+                else:
+                    if var in opt_config.variables:
+                        opt_config.variables.remove(var)
+                
+                st.caption(f"单位: {var.unit} | {var.description}")
+    
+    with col2:
+        st.subheader("🎯 优化目标配置")
+        
+        opt_mode = st.radio(
+            "优化模式",
+            ["Pareto多目标优化", "加权单目标优化"],
+            index=0 if opt_config.use_pareto else 1,
+            horizontal=True,
+        )
+        opt_config.use_pareto = opt_mode == "Pareto多目标优化"
+        
+        st.markdown("**选择优化目标及权重**")
+        st.caption("权重仅在加权模式下生效，用于计算综合评分")
+        
+        weights_total = 0.0
+        for i, obj in enumerate(DEFAULT_OBJECTIVES):
+            col_name, col_dir, col_weight = st.columns([2, 1, 1])
+            
+            with col_name:
+                selected = st.checkbox(
+                    f"{obj.display_name} ({obj.unit})",
+                    value=True,
+                    key=f"opt_obj_{i}",
+                )
+            
+            with col_dir:
+                direction = st.selectbox(
+                    "方向",
+                    ["最小化", "最大化"],
+                    index=0,
+                    key=f"opt_dir_{i}",
+                    label_visibility="collapsed",
+                )
+                obj.direction = 'minimize' if direction == "最小化" else 'maximize'
+            
+            with col_weight:
+                weight = st.slider(
+                    "权重",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=opt_config.objective_weights.get(obj.name, 0.25),
+                    step=0.05,
+                    key=f"opt_weight_{i}",
+                    label_visibility="collapsed",
+                )
+                opt_config.objective_weights[obj.name] = weight
+                weights_total += weight
+            
+            if selected:
+                if obj not in opt_config.objectives:
+                    opt_config.objectives.append(obj)
+            else:
+                if obj in opt_config.objectives:
+                    opt_config.objectives.remove(obj)
+        
+        if not opt_config.use_pareto:
+            st.info(f"当前权重合计: {weights_total:.2f}" + 
+                   (" (建议归一化到1.0)" if abs(weights_total - 1.0) > 0.01 else " ✓"))
+    
+    st.markdown("---")
+    
+    col_params1, col_params2 = st.columns([1, 1])
+    
+    with col_params1:
+        st.subheader("🔬 算法参数")
+        
+        pop_size = st.number_input(
+            "种群规模",
+            min_value=10,
+            max_value=200,
+            value=opt_config.population_size,
+            step=10,
+            help="每代中的个体数量，越大搜索越充分但计算越慢",
+        )
+        
+        max_gen = st.number_input(
+            "迭代代数",
+            min_value=10,
+            max_value=500,
+            value=opt_config.max_generations,
+            step=10,
+            help="遗传算法迭代次数",
+        )
+        
+        opt_config.population_size = int(pop_size)
+        opt_config.max_generations = int(max_gen)
+    
+    with col_params2:
+        st.subheader("📋 约束条件 (一级A标准)")
+        
+        standard = STANDARDS['一级A']
+        st.info(f"""
+        **强制约束:**
+        - 出水 COD ≤ {standard.COD} mg/L
+        - 出水 NH3-N ≤ {standard.NH3_N} mg/L
+        - 出水 TN ≤ {standard.TN} mg/L
+        - 出水 TP ≤ {standard.TP} mg/L
+        
+        不满足约束的个体将在排序时给予惩罚
+        """)
+    
+    st.markdown("---")
+    
+    col_run, col_stop, col_status = st.columns([1, 1, 2])
+    
+    with col_run:
+        if st.button("🚀 开始优化", 
+                    type="primary", 
+                    use_container_width=True,
+                    disabled=st.session_state.optimization_running):
+            
+            if len(opt_config.variables) == 0:
+                st.error("请至少选择一个决策变量！")
+            elif len(opt_config.objectives) == 0:
+                st.error("请至少选择一个优化目标！")
+            else:
+                st.session_state.optimization_running = True
+                st.session_state.optimization_aborted = False
+                st.session_state.optimization_progress = 0.0
+                st.session_state.optimization_result = None
+                
+                progress_bar = st.progress(0.0)
+                status_text = st.empty()
+                gen_info = st.empty()
+                
+                def progress_callback(current_gen, max_gen, best_fitness, avg_fitness):
+                    progress = current_gen / max_gen if max_gen > 0 else 0
+                    st.session_state.optimization_progress = progress
+                    progress_bar.progress(min(progress, 1.0))
+                    status_text.text(f"迭代 {current_gen}/{max_gen} | 最优适应度: {best_fitness:.2f} | 平均: {avg_fitness:.2f}")
+                    gen_info.info(f"🔄 正在进行第 {current_gen} 代进化...")
+                
+                def stop_check():
+                    return st.session_state.optimization_aborted
+                
+                optimizer = NSGA2Optimizer(
+                    config=opt_config,
+                    pfs=st.session_state.pfs,
+                    influent=st.session_state.influent,
+                    asm1_params=st.session_state.asm1_params,
+                    solver_config=st.session_state.solver_config,
+                )
+                
+                st.session_state.optimization_optimizer = optimizer
+                
+                with st.spinner("NSGA-II多目标优化进行中... (可随时点击终止按钮)"):
+                    try:
+                        result = optimizer.optimize(
+                            progress_callback=progress_callback,
+                            stop_check_callback=stop_check,
+                        )
+                        st.session_state.optimization_result = result
+                        
+                        if result.was_aborted:
+                            st.warning(f"优化已提前终止，完成 {len(result.all_populations)-1}/{max_gen} 代")
+                        else:
+                            st.success(f"🎉 优化完成！共评估 {result.total_evaluations} 个方案，"
+                                      f"获得 {len(result.pareto_front)} 个Pareto最优解")
+                    except Exception as e:
+                        st.error(f"优化过程出错: {str(e)}")
+                
+                st.session_state.optimization_running = False
+                progress_bar.progress(1.0)
+                status_text.text("优化完成！")
+                gen_info.empty()
+                st.rerun()
+    
+    with col_stop:
+        if st.button("⏹️ 终止优化", 
+                    type="secondary", 
+                    use_container_width=True,
+                    disabled=not st.session_state.optimization_running):
+            st.session_state.optimization_aborted = True
+            if st.session_state.optimization_optimizer is not None:
+                st.session_state.optimization_optimizer.stop()
+            st.rerun()
+    
+    with col_status:
+        if st.session_state.optimization_running:
+            st.info(f"🔄 优化进行中... ({st.session_state.optimization_progress*100:.1f}%)")
+        elif st.session_state.optimization_result is not None:
+            if st.session_state.optimization_result.was_aborted:
+                st.warning("⚠️ 优化已提前终止")
+            else:
+                st.success("✅ 优化已完成")
+    
+    if st.session_state.optimization_running:
+        st.info("💡 优化过程中每代需要对种群中每个个体调用稳态求解器进行仿真计算，"
+                "种群50、迭代100代约需要5-10分钟，请耐心等待。")
+    
+    if st.session_state.optimization_result is not None:
+        result = st.session_state.optimization_result
+        
+        st.markdown("---")
+        st.subheader("📊 优化结果")
+        
+        tab1, tab2, tab3, tab4 = st.tabs([
+            "📈 Pareto前沿", 
+            "📋 方案推荐", 
+            "📉 收敛曲线", 
+            "🎯 平行坐标"
+        ])
+        
+        with tab1:
+            st.markdown("### Pareto前沿散点图")
+            st.caption("每个点代表一个非支配最优方案，横轴为能耗，纵轴为出水TN，颜色表示第三个目标值")
+            
+            col_color, _ = st.columns([1, 3])
+            with col_color:
+                color_by = st.selectbox(
+                    "颜色映射",
+                    options=[
+                        ("产泥量", "sludge"),
+                        ("出水NH3-N", "NH3_N"),
+                        ("能耗", "energy"),
+                        ("出水TN", "TN"),
+                    ],
+                    format_func=lambda x: x[0],
+                    index=0,
+                    key="opt_color_by",
+                )
+                st.session_state.optimization_color_by = color_by[1]
+            
+            fig_pareto = plot_pareto_front(
+                result.pareto_front, 
+                color_by=st.session_state.optimization_color_by
+            )
+            st.plotly_chart(fig_pareto, use_container_width=True)
+            
+            st.info("💡 **Pareto最优解**: 这些方案在多个目标之间达到了最优平衡，"
+                   "改进其中一个目标必然会导致至少一个其他目标变差。"
+                   "鼠标悬停可查看该方案的详细参数和出水指标。")
+        
+        with tab2:
+            st.markdown("### 最优方案推荐")
+            st.caption("按综合评分排序，评分越低越好。可选择方案一键回填到工艺配置。")
+            
+            all_individuals = []
+            for pop in result.all_populations:
+                all_individuals.extend(pop)
+            
+            unique_solutions = {}
+            for ind in all_individuals:
+                if ind.converged:
+                    key = tuple(round(v, 4) for v in ind.variables)
+                    if key not in unique_solutions:
+                        unique_solutions[key] = ind
+            
+            scored_solutions = []
+            for ind in unique_solutions.values():
+                score = calculate_composite_score(ind, opt_config.objective_weights)
+                scored_solutions.append((score, ind))
+            
+            scored_solutions.sort(key=lambda x: x[0])
+            top_solutions = scored_solutions[:10]
+            
+            if len(top_solutions) == 0:
+                st.warning("未找到有效方案")
+            else:
+                table_data = []
+                for rank, (score, ind) in enumerate(top_solutions, 1):
+                    do = ind.variables[0] if len(ind.variables) > 0 else 0
+                    irr = ind.variables[1] if len(ind.variables) > 1 else 0
+                    srt = ind.variables[2] if len(ind.variables) > 2 else 0
+                    rr = ind.variables[3] if len(ind.variables) > 3 else 0
+                    
+                    cod = ind.effluent_quality.get('COD', 0)
+                    nh3 = ind.effluent_quality.get('NH3_N', 0)
+                    tn = ind.effluent_quality.get('TN', 0)
+                    tp = ind.effluent_quality.get('TP', 0)
+                    
+                    energy = ind.energy_result.total_kwh_d if ind.energy_result else 0
+                    sludge = ind.sludge_result.daily_sludge_kg if ind.sludge_result else 0
+                    
+                    compliant = "✅ 达标" if ind.is_feasible else "❌ 超标"
+                    
+                    table_data.append({
+                        '排名': rank,
+                        '综合评分': f"{score:.3f}",
+                        'DO (mg/L)': f"{do:.2f}",
+                        '内回流比 (%)': f"{irr:.0f}",
+                        'SRT (天)': f"{srt:.1f}",
+                        '回流比 (%)': f"{rr:.0f}",
+                        'COD (mg/L)': f"{cod:.2f}",
+                        'NH3-N (mg/L)': f"{nh3:.2f}",
+                        'TN (mg/L)': f"{tn:.2f}",
+                        'TP (mg/L)': f"{tp:.2f}",
+                        '能耗 (kWh/d)': f"{energy:.1f}",
+                        '产泥量 (kg/d)': f"{sludge:.1f}",
+                        '达标情况': compliant,
+                    })
+                
+                df = pd.DataFrame(table_data)
+                
+                selected_rank = st.selectbox(
+                    "选择方案进行查看",
+                    options=[row['排名'] for row in table_data],
+                    format_func=lambda x: f"方案 {x} (评分: {table_data[x-1]['综合评分']})",
+                    key="opt_selected_rank",
+                )
+                
+                st.dataframe(
+                    df,
+                    hide_index=True,
+                    use_container_width=True,
+                    height=400,
+                )
+                
+                selected_idx = selected_rank - 1
+                _, selected_ind = top_solutions[selected_idx]
+                st.session_state.optimization_selected_solution = selected_ind
+                
+                st.markdown("---")
+                st.markdown(f"#### 🎯 已选方案详情 (方案 {selected_rank})")
+                
+                col_det1, col_det2 = st.columns([1, 1])
+                
+                with col_det1:
+                    st.markdown("**🔧 决策变量**")
+                    do = selected_ind.variables[0] if len(selected_ind.variables) > 0 else 0
+                    irr = selected_ind.variables[1] if len(selected_ind.variables) > 1 else 0
+                    srt = selected_ind.variables[2] if len(selected_ind.variables) > 2 else 0
+                    rr = selected_ind.variables[3] if len(selected_ind.variables) > 3 else 0
+                    
+                    st.metric("好氧池DO", f"{do:.2f} mg/L")
+                    st.metric("内回流比", f"{irr:.0f} %")
+                    st.metric("好氧池SRT", f"{srt:.1f} 天")
+                    st.metric("回流污泥比", f"{rr:.0f} %")
+                
+                with col_det2:
+                    st.markdown("**🎯 出水指标**")
+                    cod = selected_ind.effluent_quality.get('COD', 0)
+                    nh3 = selected_ind.effluent_quality.get('NH3_N', 0)
+                    tn = selected_ind.effluent_quality.get('TN', 0)
+                    tp = selected_ind.effluent_quality.get('TP', 0)
+                    energy = selected_ind.energy_result.total_kwh_d if selected_ind.energy_result else 0
+                    sludge = selected_ind.sludge_result.daily_sludge_kg if selected_ind.sludge_result else 0
+                    
+                    st.metric("出水COD", f"{cod:.2f} mg/L", 
+                              delta=f"{cod - standard.COD:.2f}",
+                              delta_color="inverse")
+                    st.metric("出水NH3-N", f"{nh3:.2f} mg/L",
+                              delta=f"{nh3 - standard.NH3_N:.2f}",
+                              delta_color="inverse")
+                    st.metric("出水TN", f"{tn:.2f} mg/L",
+                              delta=f"{tn - standard.TN:.2f}",
+                              delta_color="inverse")
+                    st.metric("出水TP", f"{tp:.2f} mg/L",
+                              delta=f"{tp - standard.TP:.2f}",
+                              delta_color="inverse")
+                
+                col_e1, col_e2, col_e3 = st.columns(3)
+                with col_e1:
+                    st.metric("日均能耗", f"{energy:.1f} kWh/d")
+                with col_e2:
+                    st.metric("日产泥量", f"{sludge:.1f} kg DS/d")
+                with col_e3:
+                    if selected_ind.is_feasible:
+                        st.success("✅ 全面达标")
+                    else:
+                        st.error("❌ 存在超标指标")
+                
+                st.markdown("---")
+                
+                if st.button("📋 一键回填到工艺配置", 
+                            type="primary", 
+                            use_container_width=True,
+                            help="将此方案的参数应用到主系统的工艺配置中"):
+                    
+                    do = selected_ind.variables[0] if len(selected_ind.variables) > 0 else 2.0
+                    irr = selected_ind.variables[1] if len(selected_ind.variables) > 1 else 200.0
+                    srt = selected_ind.variables[2] if len(selected_ind.variables) > 2 else 15.0
+                    rr = selected_ind.variables[3] if len(selected_ind.variables) > 3 else 50.0
+                    
+                    for reactor in st.session_state.pfs.reactors:
+                        if reactor.reactor_type == ReactorType.AEROBIC:
+                            reactor.operation.DO_setpoint = float(do)
+                            reactor.operation.SRT = float(srt)
+                        
+                        if hasattr(reactor.operation, 'internal_return_ratio'):
+                            reactor.operation.internal_return_ratio = float(irr) / 100.0
+                        
+                        if hasattr(reactor.operation, 'return_sludge_ratio'):
+                            if reactor.reactor_type == ReactorType.SECONDARY or reactor.is_biological():
+                                reactor.operation.return_sludge_ratio = float(rr) / 100.0
+                    
+                    for reactor in st.session_state.pfs.reactors:
+                        if reactor.is_biological() and hasattr(reactor.operation, 'SRT'):
+                            reactor.operation.SRT = float(srt)
+                    
+                    st.success(f"""
+                    ✅ 参数已成功回填！
+                    
+                    **应用的参数:**
+                    - 好氧池 DO: {do:.2f} mg/L
+                    - 内回流比: {irr:.0f}%
+                    - 好氧池 SRT: {srt:.1f} 天
+                    - 回流污泥比: {rr:.0f}%
+                    
+                    请前往「稳态求解」页面重新运行仿真以验证优化效果。
+                    """)
+                    
+                    st.session_state.current_page = "🎯 稳态求解"
+                    st.rerun()
+        
+        with tab3:
+            st.markdown("### 收敛曲线图")
+            st.caption("展示每代种群的平均适应度和最优适应度变化趋势")
+            
+            if len(result.best_fitness_history) > 0:
+                fig_conv = plot_convergence_curve(
+                    result.best_fitness_history,
+                    result.avg_fitness_history,
+                )
+                st.plotly_chart(fig_conv, use_container_width=True)
+                
+                st.info(f"""
+                **优化统计:**
+                - 总迭代代数: {len(result.all_populations)-1} 代
+                - 总评估次数: {result.total_evaluations} 次
+                - Pareto最优解数量: {len(result.pareto_front)} 个
+                - 初始最优适应度: {result.best_fitness_history[0]:.2f}
+                - 最终最优适应度: {result.best_fitness_history[-1]:.2f}
+                - 改进幅度: {((result.best_fitness_history[0] - result.best_fitness_history[-1]) / result.best_fitness_history[0] * 100):.1f}%
+                """)
+            else:
+                st.info("暂无收敛数据")
+        
+        with tab4:
+            st.markdown("### 多目标平行坐标图")
+            st.caption("展示各目标之间的权衡关系，每条线代表一个Pareto最优解")
+            
+            fig_parallel = plot_objective_parallel_coordinates(result.pareto_front)
+            st.plotly_chart(fig_parallel, use_container_width=True)
+            
+            st.info("💡 **平行坐标图解读**: 从左到右依次为四个优化目标。"
+                   "每条线代表一个方案，颜色深浅表示TN浓度。"
+                   "通过观察线条走势可以发现目标之间的权衡关系。")
+        
+        st.markdown("---")
+        st.subheader("💡 优化建议")
+        
+        if len(result.pareto_front) > 0:
+            feasible_count = sum(1 for ind in result.pareto_front if ind.is_feasible)
+            total_count = len(result.pareto_front)
+            
+            st.success(f"""
+            **优化总结:**
+            
+            🎯 共找到 **{total_count}** 个Pareto最优解，其中 **{feasible_count}** 个满足一级A排放标准。
+            
+            📊 **目标范围:**
+            - 能耗范围: {min(ind.energy_result.total_kwh_d for ind in result.pareto_front if ind.energy_result):.1f} - {max(ind.energy_result.total_kwh_d for ind in result.pareto_front if ind.energy_result):.1f} kWh/d
+            - 出水TN范围: {min(ind.effluent_quality.get('TN', 0) for ind in result.pareto_front):.2f} - {max(ind.effluent_quality.get('TN', 0) for ind in result.pareto_front):.2f} mg/L
+            
+            💡 **决策建议**:
+            - 如果最看重节能降耗，可选择能耗最低的方案
+            - 如果最看重出水水质，可选择TN/氨氮最低的方案
+            - 如果需要平衡多个目标，可选择综合评分最优的方案
+            """)
+
+
 def main():
     """主函数"""
     init_session_state()
@@ -2327,6 +2883,7 @@ def main():
             "📈 动态仿真": page_dynamic,
             "📊 敏感性分析": page_sensitivity,
             "💡 优化建议": page_optimization,
+            "🧬 多目标优化": page_multiobjective_optimization,
         }
         
         for page_name, page_func in pages.items():

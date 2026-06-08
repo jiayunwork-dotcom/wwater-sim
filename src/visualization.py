@@ -811,3 +811,236 @@ def plot_srt_vs_energy(srt_values: List[float],
     )
     
     return fig
+
+
+def plot_pareto_front(pareto_front: List, color_by: str = 'sludge') -> go.Figure:
+    """
+    绘制Pareto前沿散点图
+    
+    参数:
+        pareto_front: Pareto前沿个体列表
+        color_by: 颜色映射的目标 ('sludge', 'NH3_N', 'energy', 'TN')
+    
+    返回:
+        plotly Figure
+    """
+    from .nsga2_optimizer import Individual
+    
+    if not pareto_front or len(pareto_front) == 0:
+        fig = go.Figure()
+        fig.update_layout(
+            title='Pareto前沿',
+            xaxis_title='能耗 (kWh/d)',
+            yaxis_title='出水TN (mg/L)',
+            height=500,
+        )
+        return fig
+    
+    x_vals = []
+    y_vals = []
+    color_vals = []
+    hover_texts = []
+    
+    color_label_map = {
+        'sludge': '产泥量 (kg DS/d)',
+        'NH3_N': '出水NH3-N (mg/L)',
+        'energy': '能耗 (kWh/d)',
+        'TN': '出水TN (mg/L)',
+    }
+    color_label = color_label_map.get(color_by, '产泥量 (kg DS/d)')
+    
+    for ind in pareto_front:
+        if not ind.converged:
+            continue
+        
+        energy = ind.energy_result.total_kwh_d if ind.energy_result else 0
+        tn = ind.effluent_quality.get('TN', 0)
+        
+        if color_by == 'sludge':
+            color_val = ind.sludge_result.daily_sludge_kg if ind.sludge_result else 0
+        elif color_by == 'NH3_N':
+            color_val = ind.effluent_quality.get('NH3_N', 0)
+        elif color_by == 'energy':
+            color_val = energy
+        else:
+            color_val = tn
+        
+        x_vals.append(energy)
+        y_vals.append(tn)
+        color_vals.append(color_val)
+        
+        do = ind.variables[0] if len(ind.variables) > 0 else 0
+        irr = ind.variables[1] if len(ind.variables) > 1 else 0
+        srt = ind.variables[2] if len(ind.variables) > 2 else 0
+        rr = ind.variables[3] if len(ind.variables) > 3 else 0
+        
+        nh3 = ind.effluent_quality.get('NH3_N', 0)
+        cod = ind.effluent_quality.get('COD', 0)
+        tp = ind.effluent_quality.get('TP', 0)
+        sludge = ind.sludge_result.daily_sludge_kg if ind.sludge_result else 0
+        
+        compliant = "是" if ind.is_feasible else "否"
+        
+        hover_text = (
+            f"<b>能耗:</b> {energy:.1f} kWh/d<br>"
+            f"<b>出水TN:</b> {tn:.2f} mg/L<br>"
+            f"<b>出水NH3-N:</b> {nh3:.2f} mg/L<br>"
+            f"<b>出水COD:</b> {cod:.2f} mg/L<br>"
+            f"<b>出水TP:</b> {tp:.2f} mg/L<br>"
+            f"<b>产泥量:</b> {sludge:.1f} kg DS/d<br>"
+            f"<b>DO设定:</b> {do:.2f} mg/L<br>"
+            f"<b>内回流比:</b> {irr:.0f}%<br>"
+            f"<b>SRT:</b> {srt:.1f} 天<br>"
+            f"<b>回流比:</b> {rr:.0f}%<br>"
+            f"<b>达标:</b> {compliant}"
+        )
+        hover_texts.append(hover_text)
+    
+    fig = go.Figure()
+    
+    fig.add_trace(
+        go.Scatter(
+            x=x_vals,
+            y=y_vals,
+            mode='markers',
+            marker=dict(
+                size=12,
+                color=color_vals,
+                colorscale='Viridis',
+                showscale=True,
+                colorbar=dict(title=color_label),
+                line=dict(width=1, color='DarkSlateGrey'),
+            ),
+            text=hover_texts,
+            hovertemplate='%{text}<extra></extra>',
+            name='Pareto最优解',
+        )
+    )
+    
+    fig.update_layout(
+        title='Pareto前沿 - 能耗 vs 出水TN',
+        xaxis_title='能耗 (kWh/d)',
+        yaxis_title='出水TN (mg/L)',
+        height=550,
+        hovermode='closest',
+        margin=dict(l=60, r=60, t=80, b=60),
+    )
+    
+    return fig
+
+
+def plot_convergence_curve(
+    best_fitness_history: List[float], 
+    avg_fitness_history: List[float]
+) -> go.Figure:
+    """
+    绘制收敛曲线图
+    
+    参数:
+        best_fitness_history: 每代最优适应度
+        avg_fitness_history: 每代平均适应度
+    
+    返回:
+        plotly Figure
+    """
+    generations = list(range(len(best_fitness_history)))
+    
+    fig = go.Figure()
+    
+    fig.add_trace(
+        go.Scatter(
+            x=generations,
+            y=best_fitness_history,
+            mode='lines+markers',
+            name='最优适应度',
+            line=dict(color='#1f77b4', width=2),
+            marker=dict(size=6),
+        )
+    )
+    
+    fig.add_trace(
+        go.Scatter(
+            x=generations,
+            y=avg_fitness_history,
+            mode='lines+markers',
+            name='平均适应度',
+            line=dict(color='#ff7f0e', width=2),
+            marker=dict(size=6),
+        )
+    )
+    
+    fig.update_layout(
+        title='算法收敛曲线',
+        xaxis_title='迭代代数',
+        yaxis_title='适应度值',
+        height=400,
+        hovermode='x unified',
+        legend=dict(orientation='h', yanchor='bottom', y=-0.2),
+        margin=dict(l=60, r=60, t=80, b=60),
+    )
+    
+    return fig
+
+
+def plot_objective_parallel_coordinates(pareto_front: List) -> go.Figure:
+    """
+    绘制平行坐标图展示多目标关系
+    
+    参数:
+        pareto_front: Pareto前沿个体列表
+    
+    返回:
+        plotly Figure
+    """
+    from .nsga2_optimizer import Individual
+    
+    if not pareto_front or len(pareto_front) == 0:
+        fig = go.Figure()
+        return fig
+    
+    nh3_vals = []
+    tn_vals = []
+    energy_vals = []
+    sludge_vals = []
+    
+    for ind in pareto_front:
+        if not ind.converged:
+            continue
+        
+        nh3_vals.append(ind.effluent_quality.get('NH3_N', 0))
+        tn_vals.append(ind.effluent_quality.get('TN', 0))
+        energy_vals.append(ind.energy_result.total_kwh_d if ind.energy_result else 0)
+        sludge_vals.append(ind.sludge_result.daily_sludge_kg if ind.sludge_result else 0)
+    
+    if len(tn_vals) == 0:
+        fig = go.Figure()
+        return fig
+    
+    fig = go.Figure(data=
+        go.Parcoords(
+            line=dict(
+                color=tn_vals,
+                colorscale='Viridis',
+                showscale=True,
+                colorbar=dict(title='TN (mg/L)')
+            ),
+            dimensions=list([
+                dict(range=[min(nh3_vals), max(nh3_vals)],
+                     label='NH3-N (mg/L)', values=nh3_vals),
+                dict(range=[min(tn_vals), max(tn_vals)],
+                     label='TN (mg/L)', values=tn_vals),
+                dict(range=[min(energy_vals), max(energy_vals)],
+                     label='能耗 (kWh/d)', values=energy_vals),
+                dict(range=[min(sludge_vals), max(sludge_vals)],
+                     label='产泥 (kg/d)', values=sludge_vals),
+            ])
+        )
+    )
+    
+    fig.update_layout(
+        title='多目标平行坐标图',
+        height=450,
+        margin=dict(l=80, r=80, t=80, b=60),
+    )
+    
+    return fig
