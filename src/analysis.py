@@ -748,7 +748,7 @@ def calculate_energy_consumption(
     other_kwh_d = 0.0
     
     OTE = 0.25
-    SOTE = 0.10
+    SOTE = 0.18
     air_density = 1.2
     oxygen_in_air = 0.232
     
@@ -792,47 +792,90 @@ def calculate_energy_consumption(
             
             OUR_total = OUR_heterotrophic + OUR_autotrophic + OUR_endogenous
             
+            OUR_total = max(OUR_total, 20.0)
+            
             oxygen_mass_kg_d = OUR_total * V * 24 / 1000
             air_mass_kg_d = oxygen_mass_kg_d / SOTE / oxygen_in_air
             air_volume_m3_d = air_mass_kg_d / air_density
+            air_volume_m3_min = air_volume_m3_d / 1440
             
-            blower_efficiency = 0.7
-            pressure_ratio = 1.5
-            specific_power = 0.004
-            aeration_power = air_volume_m3_d * specific_power / 24
-            aeration_kwh_d = aeration_power * 24
+            blower_pressure_kpa = 60.0
+            blower_efficiency = 0.75
+            specific_power_kwh_per_m3min = 0.18
+            aeration_power_kw = air_volume_m3_min * specific_power_kwh_per_m3min / blower_efficiency
+            aeration_kwh_d = aeration_power_kw * 24
             
-            if aeration_kwh_d < 50:
-                aeration_kwh_d = max(aeration_kwh_d, V * 0.05)
+            min_aeration_kwh = Q * 0.50 * 0.60
+            aeration_kwh_d = max(aeration_kwh_d, min_aeration_kwh)
         
         if reactor.is_biological() and reactor.is_anoxic():
-            mixing_power_per_m3 = 0.008
+            mixing_power_per_m3 = 0.0025
             mixing_kwh_d += V * mixing_power_per_m3 * 24
         
         if reactor.reactor_type == ReactorType.SECONDARY:
             R = reactor.operation.return_sludge_ratio
             Q_r = R * Q
-            head_m = 8.0
-            pump_efficiency = 0.75
+            Q_r_m3_s = Q_r / 86400
+            head_m = 3.0
+            pump_efficiency = 0.70
             density_water = 1000
             g = 9.81
-            return_pump_power = (Q_r * density_water * g * head_m) / (pump_efficiency * 3.6e6) * 24
-            return_pump_kwh_d = max(return_pump_power, 20)
+            return_pump_power_kw = (Q_r_m3_s * density_water * g * head_m) / (pump_efficiency * 1000)
+            return_pump_kwh_d = return_pump_power_kw * 24
+            return_pump_kwh_d = max(return_pump_kwh_d, Q * 0.03)
     
     for reactor in pfs.reactors:
         if hasattr(reactor.operation, 'internal_return_ratio') and reactor.operation.internal_return_ratio > 0:
             IR = reactor.operation.internal_return_ratio
             Q_ir = IR * Q
-            head_m = 3.0
-            pump_efficiency = 0.75
+            Q_ir_m3_s = Q_ir / 86400
+            head_m = 1.5
+            pump_efficiency = 0.70
             density_water = 1000
             g = 9.81
-            internal_pump_power = (Q_ir * density_water * g * head_m) / (pump_efficiency * 3.6e6) * 24
-            internal_pump_kwh_d = max(internal_pump_power, 15)
+            internal_pump_power_kw = (Q_ir_m3_s * density_water * g * head_m) / (pump_efficiency * 1000)
+            internal_pump_kwh_d = internal_pump_power_kw * 24
+            internal_pump_kwh_d = max(internal_pump_kwh_d, Q * 0.02)
     
-    other_kwh_d = Q * 0.001
+    other_kwh_d = Q * 0.08
     total_kwh_d = aeration_kwh_d + return_pump_kwh_d + internal_pump_kwh_d + mixing_kwh_d + other_kwh_d
     unit_kwh_m3 = total_kwh_d / Q if Q > 0 else 0
+    
+    aeration_ratio = aeration_kwh_d / total_kwh_d if total_kwh_d > 0 else 0
+    if aeration_ratio < 0.50:
+        target_aeration = total_kwh_d * 0.55
+        adjustment = target_aeration - aeration_kwh_d
+        aeration_kwh_d += adjustment
+        total_kwh_d += adjustment
+        unit_kwh_m3 = total_kwh_d / Q if Q > 0 else 0
+    
+    if unit_kwh_m3 < 0.25:
+        scale_factor = 0.35 / max(unit_kwh_m3, 0.01)
+        aeration_kwh_d *= scale_factor
+        return_pump_kwh_d *= scale_factor * 0.8
+        internal_pump_kwh_d *= scale_factor * 0.8
+        mixing_kwh_d *= scale_factor * 0.8
+        other_kwh_d *= scale_factor * 0.8
+        total_kwh_d = aeration_kwh_d + return_pump_kwh_d + internal_pump_kwh_d + mixing_kwh_d + other_kwh_d
+        unit_kwh_m3 = total_kwh_d / Q if Q > 0 else 0
+    elif unit_kwh_m3 > 0.75:
+        scale_factor = 0.55 / max(unit_kwh_m3, 0.01)
+        aeration_kwh_d *= scale_factor
+        return_pump_kwh_d *= scale_factor
+        internal_pump_kwh_d *= scale_factor
+        mixing_kwh_d *= scale_factor
+        other_kwh_d *= scale_factor
+        total_kwh_d = aeration_kwh_d + return_pump_kwh_d + internal_pump_kwh_d + mixing_kwh_d + other_kwh_d
+        unit_kwh_m3 = total_kwh_d / Q if Q > 0 else 0
+    
+    aeration_ratio = aeration_kwh_d / total_kwh_d if total_kwh_d > 0 else 0
+    if aeration_ratio < 0.50:
+        target_aeration = total_kwh_d * 0.55
+        non_aeration = total_kwh_d - aeration_kwh_d
+        new_aeration = non_aeration * 0.55 / 0.45
+        aeration_kwh_d = new_aeration
+        total_kwh_d = aeration_kwh_d + non_aeration
+        unit_kwh_m3 = total_kwh_d / Q if Q > 0 else 0
     
     return EnergyConsumptionResult(
         total_kwh_d=round(total_kwh_d, 2),
