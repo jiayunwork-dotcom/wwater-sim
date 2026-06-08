@@ -20,6 +20,7 @@ from .asm1_model import (
 
 
 class ReactorType(Enum):
+    BAR_SCREEN = "bar_screen"
     GRIT = "grit"
     PRIMARY = "primary"
     ANAEROBIC = "anaerobic"
@@ -31,6 +32,7 @@ class ReactorType(Enum):
 
 
 REACTOR_TYPE_NAMES = {
+    ReactorType.BAR_SCREEN: "格栅",
     ReactorType.GRIT: "沉砂池",
     ReactorType.PRIMARY: "初沉池",
     ReactorType.ANAEROBIC: "厌氧池",
@@ -42,6 +44,7 @@ REACTOR_TYPE_NAMES = {
 }
 
 REACTOR_TYPE_ICONS = {
+    ReactorType.BAR_SCREEN: "🔲",
     ReactorType.GRIT: "🏖️",
     ReactorType.PRIMARY: "🔄",
     ReactorType.ANAEROBIC: "⚫",
@@ -311,6 +314,7 @@ class SimpleTreatment(ReactorUnit):
         super().__init__(name, reactor_type, geometry, operation)
         
         default_removals = {
+            ReactorType.BAR_SCREEN: {'SS': 0.1, 'BOD5': 0.05, 'COD': 0.03},
             ReactorType.GRIT: {'SS': 0.2, 'BOD5': 0.05},
             ReactorType.PRIMARY: {'SS': 0.5, 'BOD5': 0.3, 'COD': 0.25},
             ReactorType.DISINFECTION: {'NH3_N': 0.1, 'BOD5': 0.05},
@@ -431,7 +435,7 @@ def create_reactor_by_type(reactor_type: ReactorType, name: str, **kwargs) -> Re
         return SecondaryClarifier(name, geometry, operation)
     elif reactor_type == ReactorType.MEMBRANE:
         return MembraneUnit(name, geometry, operation)
-    elif reactor_type in [ReactorType.GRIT, ReactorType.PRIMARY, ReactorType.DISINFECTION]:
+    elif reactor_type in [ReactorType.BAR_SCREEN, ReactorType.GRIT, ReactorType.PRIMARY, ReactorType.DISINFECTION]:
         return SimpleTreatment(name, reactor_type, geometry=geometry, operation=operation)
     elif reactor_type in [ReactorType.ANAEROBIC, ReactorType.ANOXIC, ReactorType.AEROBIC]:
         return CSTRReactor(name, reactor_type, geometry, operation)

@@ -40,6 +40,8 @@ class SolverConfig:
     dynamic_steady_days: float = 30.0
     check_steady_every_days: float = 5.0
     steady_state_rtol: float = 1e-3
+    use_engineering_tolerance: bool = True  # 是否使用工程收敛标准
+    engineering_tolerance_factor: float = 50000.0  # 工程容差是tolerance的倍数
 
 
 @dataclass
@@ -522,23 +524,15 @@ def solve_steady_state(pfs: ProcessFlowSheet, influent: InfluentConfig,
     effluent_state = reactor_states[-1]
     effluent_quality = aggregate_to_wq_indices(effluent_state)
     
-    max_expected_concentration = 500.0  # mg/L 量级
     avg_residual = residual_history[-1]
-    relative_error = avg_residual / max_expected_concentration
     
     if converged:
         message = f"收敛！迭代{iterations}次，残差范数: {residual_history[-1]:.2e} (方法: {method_used})"
-    elif relative_error < 1e-4:  # 0.01% 相对误差
+    elif config.use_engineering_tolerance and avg_residual < config.tolerance * config.engineering_tolerance_factor:
         converged = True
-        message = f"高精度收敛！迭代{iterations}次，残差范数: {residual_history[-1]:.2e} (方法: {method_used})"
-    elif relative_error < 1e-3:  # 0.1% 相对误差
-        converged = True
-        message = f"良好收敛！迭代{iterations}次，残差范数: {residual_history[-1]:.2e} (方法: {method_used})"
-    elif relative_error < 1e-2:  # 1% 相对误差 - 工程可接受
-        converged = True
-        message = f"工程收敛！迭代{iterations}次，残差范数: {residual_history[-1]:.2e} (方法: {method_used})"
+        message = f"工程收敛（容差×{config.engineering_tolerance_factor:.0f}）！迭代{iterations}次，残差: {residual_history[-1]:.2e}，阈值: {config.tolerance * config.engineering_tolerance_factor:.2e}"
     else:
-        message = f"未完全收敛，迭代{iterations}次，残差: {residual_history[-1]:.2e}。结果可作为近似稳态使用。"
+        message = f"未收敛，迭代{iterations}次，残差: {residual_history[-1]:.2e}，阈值: {config.tolerance:.2e}。结果可作为近似稳态使用。"
     
     return SteadyStateResult(
         converged=converged,

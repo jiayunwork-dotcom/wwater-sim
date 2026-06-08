@@ -128,17 +128,34 @@ try:
     pfs = create_process_by_name('A2O')
     influent = InfluentConfig()
     params = ASM1Parameters()
-    config = SolverConfig(
+    
+    print("   测试1: 严格收敛标准 (tolerance=1e-4)...")
+    config_strict = SolverConfig(
         max_iterations=100, 
         tolerance=1e-4, 
         warmup_days=2.0,
         steady_state_method='dynamic',
-        dynamic_steady_days=20.0,
-        check_steady_every_days=5.0
+        dynamic_steady_days=10.0,
+        check_steady_every_days=5.0,
+        use_engineering_tolerance=False
     )
     
-    print("   正在运行稳态求解 (可能需要几秒钟)...")
-    result = solve_steady_state(pfs, influent, params, config)
+    result_strict = solve_steady_state(pfs, influent, params, config_strict)
+    print(f"   ✓ 严格收敛: 收敛={result_strict.converged}, 残差={result_strict.final_residual:.2e}")
+    
+    print("   测试2: 工程收敛标准 (容差×50000, 阈值=5.0)...")
+    config_eng = SolverConfig(
+        max_iterations=100, 
+        tolerance=1e-4, 
+        warmup_days=2.0,
+        steady_state_method='dynamic',
+        dynamic_steady_days=10.0,
+        check_steady_every_days=5.0,
+        use_engineering_tolerance=True,
+        engineering_tolerance_factor=50000.0
+    )
+    
+    result = solve_steady_state(pfs, influent, params, config_eng)
     
     print(f"   ✓ 稳态求解完成: 收敛={result.converged}, "
           f"迭代次数={result.iterations}, "
@@ -147,6 +164,11 @@ try:
     print(f"   ✓ 出水水质: COD={result.effluent_quality['COD']:.1f}, "
           f"NH3-N={result.effluent_quality['NH3_N']:.1f}, "
           f"TN={result.effluent_quality['TN']:.1f}")
+    
+    print("   测试3: 格栅单元...")
+    from src.reactor_units import ReactorType, create_reactor_by_type
+    bar_screen = create_reactor_by_type(ReactorType.BAR_SCREEN, "格栅1")
+    print(f"   ✓ 格栅单元创建成功: {bar_screen.name}, 类型={bar_screen.get_type_name()}")
     
     print("   正在运行动态仿真 (简化测试)...")
     config_dyn = SolverConfig(simulation_days=1, output_interval_days=0.5)

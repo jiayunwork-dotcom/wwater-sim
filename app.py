@@ -215,7 +215,10 @@ def page_process_config():
     st.markdown("---")
     st.subheader("自定义流程")
     
+    st.info("💡 **操作说明**: 从下方单元库中点击按钮逐个添加，或使用多选框批量添加多个单元。添加后可在下方调整单元顺序和参数。")
+    
     unit_lib = {
+        'bar_screen': ('格栅', ReactorType.BAR_SCREEN),
         'grit': ('沉砂池', ReactorType.GRIT),
         'primary': ('初沉池', ReactorType.PRIMARY),
         'anaerobic': ('厌氧池', ReactorType.ANAEROBIC),
@@ -226,22 +229,69 @@ def page_process_config():
         'membrane': ('膜组件', ReactorType.MEMBRANE),
     }
     
-    lib_cols = st.columns(4)
-    for i, (key, (name, rtype)) in enumerate(unit_lib.items()):
-        with lib_cols[i % 4]:
-            icon = REACTOR_TYPE_ICONS.get(rtype, '⬜')
-            if st.button(f"{icon} 添加{name}", key=f"add_{key}", use_container_width=True):
-                new_reactor = create_reactor_by_type(rtype, f"{name}{len(st.session_state.pfs.reactors)+1}")
-                st.session_state.pfs.add_reactor(new_reactor)
-                if len(st.session_state.pfs.reactors) > 1:
-                    st.session_state.pfs.connect(len(st.session_state.pfs.reactors)-2, 
-                                                  len(st.session_state.pfs.reactors)-1)
-                st.success(f"已添加{name}")
+    add_mode = st.radio(
+        "添加方式",
+        ["逐个添加", "批量添加"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    
+    if add_mode == "逐个添加":
+        st.markdown("**🏭 单元库** (点击按钮添加)")
+        lib_cols = st.columns(3)
+        for i, (key, (name, rtype)) in enumerate(unit_lib.items()):
+            with lib_cols[i % 3]:
+                icon = REACTOR_TYPE_ICONS.get(rtype, '⬜')
+                if st.button(f"{icon} 添加{name}", key=f"add_{key}", use_container_width=True):
+                    new_reactor = create_reactor_by_type(rtype, f"{name}{len(st.session_state.pfs.reactors)+1}")
+                    st.session_state.pfs.add_reactor(new_reactor)
+                    if len(st.session_state.pfs.reactors) > 1:
+                        st.session_state.pfs.connect(len(st.session_state.pfs.reactors)-2, 
+                                                      len(st.session_state.pfs.reactors)-1)
+                    st.success(f"✅ 已添加 {icon} {name}")
+    else:
+        st.markdown("**🏭 单元库** (勾选后点击批量添加)")
+        selected_units = []
+        lib_cols = st.columns(3)
+        for i, (key, (name, rtype)) in enumerate(unit_lib.items()):
+            with lib_cols[i % 3]:
+                icon = REACTOR_TYPE_ICONS.get(rtype, '⬜')
+                if st.checkbox(f"{icon} {name}", key=f"sel_{key}", value=False):
+                    selected_units.append((key, name, rtype))
+        
+        col_add, col_clear = st.columns(2)
+        with col_add:
+            if st.button(f"➕ 批量添加选中的 {len(selected_units)} 个单元", 
+                        type="primary", use_container_width=True, 
+                        disabled=len(selected_units) == 0):
+                for key, name, rtype in selected_units:
+                    new_reactor = create_reactor_by_type(rtype, f"{name}{len(st.session_state.pfs.reactors)+1}")
+                    st.session_state.pfs.add_reactor(new_reactor)
+                    if len(st.session_state.pfs.reactors) > 1:
+                        st.session_state.pfs.connect(len(st.session_state.pfs.reactors)-2, 
+                                                      len(st.session_state.pfs.reactors)-1)
+                st.success(f"✅ 已批量添加 {len(selected_units)} 个单元")
+                st.rerun()
+        with col_clear:
+            if st.button("🔄 清空选择", use_container_width=True, disabled=len(selected_units) == 0):
+                st.rerun()
     
     if len(st.session_state.pfs.reactors) > 0:
-        if st.button("🗑️ 清空流程", use_container_width=True):
-            st.session_state.pfs = ProcessFlowSheet()
-            st.warning("已清空流程")
+        st.markdown("---")
+        col_actions = st.columns(3)
+        with col_actions[0]:
+            if st.button("🗑️ 清空流程", use_container_width=True):
+                st.session_state.pfs = ProcessFlowSheet()
+                st.warning("已清空流程")
+                st.rerun()
+        with col_actions[1]:
+            if st.button("↩️ 撤销最后一个", use_container_width=True, 
+                        disabled=len(st.session_state.pfs.reactors) == 0):
+                removed = st.session_state.pfs.reactors.pop()
+                st.warning(f"已撤销: {removed.name}")
+                st.rerun()
+        with col_actions[2]:
+            st.metric("当前单元数", len(st.session_state.pfs.reactors))
     
     st.markdown("---")
     st.subheader("当前流程")
@@ -445,50 +495,164 @@ def page_influent_config():
     st.subheader("日变化模式")
     
     if flow_mode == "日变化":
-        st.write("设置24小时内流量和浓度的变化系数")
+        st.info("💡 **操作说明**: 选择预设模式后，可通过下方的「关键节点调整」拖拽修改各时段的变化系数，也可展开「逐小时精细调整」修改每个小时的值。")
         
-        pattern_type = st.selectbox(
-            "选择日变化模式",
-            ['早晚高峰模式', '均匀模式'],
-            index=0,
+        col_pattern, col_apply = st.columns([2, 1])
+        with col_pattern:
+            pattern_type = st.selectbox(
+                "选择预设日变化模式",
+                ['早晚高峰模式', '均匀模式', '单峰模式', '工业模式'],
+                index=0,
+            )
+        with col_apply:
+            st.markdown("")
+            st.markdown("")
+            if st.button("🔄 应用预设模式", use_container_width=True):
+                if pattern_type == '早晚高峰模式':
+                    influent.set_diurnal_pattern('morning_evening_peak')
+                elif pattern_type == '单峰模式':
+                    influent.set_diurnal_pattern('morning_evening_peak')
+                    for h in range(24):
+                        if 8 <= h < 20:
+                            influent.diurnal_flow_curve[h] = 1.2 + 0.3 * np.sin(np.pi * (h - 8) / 12)
+                            influent.diurnal_curve[h] = 1.1 + 0.2 * np.sin(np.pi * (h - 8) / 12)
+                elif pattern_type == '工业模式':
+                    influent.set_diurnal_pattern('uniform')
+                    for h in range(24):
+                        if 8 <= h < 18:
+                            influent.diurnal_flow_curve[h] = 1.3
+                            influent.diurnal_curve[h] = 1.2
+                else:
+                    influent.set_diurnal_pattern('uniform')
+                st.rerun()
+        
+        adjust_mode = st.radio(
+            "调整方式",
+            ["关键节点调整", "逐小时精细调整"],
+            horizontal=True,
+            label_visibility="collapsed",
         )
         
-        if pattern_type == '早晚高峰模式':
-            influent.set_diurnal_pattern('morning_evening_peak')
+        if adjust_mode == "关键节点调整":
+            st.markdown("**🎛️ 关键节点调整** (拖拽调整主要时段，中间时段自动插值)")
+            
+            key_hours = [0, 6, 9, 12, 15, 18, 21]
+            key_hours_labels = ["00:00", "06:00", "09:00", "12:00", "15:00", "18:00", "21:00"]
+            
+            tab_flow, tab_conc = st.tabs(["🌊 流量调整", "🔬 浓度调整"])
+            
+            with tab_flow:
+                col_nodes = st.columns(len(key_hours))
+                flow_key_values = []
+                for i, h in enumerate(key_hours):
+                    with col_nodes[i]:
+                        val = st.slider(
+                            key_hours_labels[i],
+                            min_value=0.5, max_value=2.0,
+                            value=float(influent.diurnal_flow_curve[h]),
+                            step=0.05,
+                            key=f"flow_key_{h}",
+                        )
+                        flow_key_values.append(val)
+                
+                for h in range(24):
+                    for i in range(len(key_hours) - 1):
+                        if key_hours[i] <= h < key_hours[i + 1]:
+                            t = (h - key_hours[i]) / (key_hours[i + 1] - key_hours[i])
+                            influent.diurnal_flow_curve[h] = flow_key_values[i] * (1 - t) + flow_key_values[i + 1] * t
+                            break
+                
+                st.success(f"已通过 {len(key_hours)} 个关键节点插值生成24小时流量曲线")
+            
+            with tab_conc:
+                col_nodes = st.columns(len(key_hours))
+                conc_key_values = []
+                for i, h in enumerate(key_hours):
+                    with col_nodes[i]:
+                        val = st.slider(
+                            key_hours_labels[i],
+                            min_value=0.5, max_value=2.0,
+                            value=float(influent.diurnal_curve[h]),
+                            step=0.05,
+                            key=f"conc_key_{h}",
+                        )
+                        conc_key_values.append(val)
+                
+                for h in range(24):
+                    for i in range(len(key_hours) - 1):
+                        if key_hours[i] <= h < key_hours[i + 1]:
+                            t = (h - key_hours[i]) / (key_hours[i + 1] - key_hours[i])
+                            influent.diurnal_curve[h] = conc_key_values[i] * (1 - t) + conc_key_values[i + 1] * t
+                            break
+                
+                st.success(f"已通过 {len(key_hours)} 个关键节点插值生成24小时浓度曲线")
+            
+            st.markdown("**📊 快速时段调整** (批量设置时段系数)")
+            col_preset1, col_preset2, col_preset3, col_preset4 = st.columns(4)
+            with col_preset1:
+                night_factor = st.slider("夜间(0-6)", 0.5, 2.0, 0.7, 0.05)
+            with col_preset2:
+                morning_factor = st.slider("早高峰(6-10)", 0.5, 2.0, 1.5, 0.05)
+            with col_preset3:
+                day_factor = st.slider("白天(10-18)", 0.5, 2.0, 1.0, 0.05)
+            with col_preset4:
+                evening_factor = st.slider("晚高峰(18-24)", 0.5, 2.0, 1.3, 0.05)
+            
+            if st.button("📋 应用时段设置到流量和浓度", use_container_width=True):
+                for h in range(24):
+                    if h < 6:
+                        influent.diurnal_flow_curve[h] = night_factor
+                        influent.diurnal_curve[h] = night_factor * 0.95
+                    elif h < 10:
+                        t = (h - 6) / 4
+                        influent.diurnal_flow_curve[h] = night_factor * (1 - t) + morning_factor * t
+                        influent.diurnal_curve[h] = (night_factor * 0.95) * (1 - t) + (morning_factor * 0.95) * t
+                    elif h < 18:
+                        t = (h - 10) / 8
+                        influent.diurnal_flow_curve[h] = morning_factor * (1 - t) + day_factor * t
+                        influent.diurnal_curve[h] = (morning_factor * 0.95) * (1 - t) + (day_factor * 0.95) * t
+                    else:
+                        t = (h - 18) / 6
+                        influent.diurnal_flow_curve[h] = day_factor * (1 - t) + evening_factor * t
+                        influent.diurnal_curve[h] = (day_factor * 0.95) * (1 - t) + (evening_factor * 0.95) * t
+                        if h >= 22:
+                            t2 = (h - 22) / 2
+                            influent.diurnal_flow_curve[h] = evening_factor * (1 - t2) + night_factor * t2
+                            influent.diurnal_curve[h] = (evening_factor * 0.95) * (1 - t2) + (night_factor * 0.95) * t2
+                st.rerun()
+        
         else:
-            influent.set_diurnal_pattern('uniform')
-        
-        hours = list(range(24))
-        
-        col_flow, col_conc = st.columns(2)
-        
-        with col_flow:
-            st.markdown("**流量日变化曲线**")
-            flow_values = []
-            for h in range(24):
-                val = st.slider(
-                    f"{h:02d}:00",
-                    min_value=0.5, max_value=2.0,
-                    value=float(influent.diurnal_flow_curve[h]),
-                    step=0.05,
-                    key=f"flow_{h}",
-                )
-                flow_values.append(val)
-            influent.diurnal_flow_curve = np.array(flow_values)
-        
-        with col_conc:
-            st.markdown("**浓度日变化曲线**")
-            conc_values = []
-            for h in range(24):
-                val = st.slider(
-                    f"{h:02d}:00",
-                    min_value=0.5, max_value=2.0,
-                    value=float(influent.diurnal_curve[h]),
-                    step=0.05,
-                    key=f"conc_{h}",
-                )
-                conc_values.append(val)
-            influent.diurnal_curve = np.array(conc_values)
+            st.markdown("**⏰ 逐小时精细调整**")
+            
+            col_flow, col_conc = st.columns(2)
+            
+            with col_flow:
+                st.markdown("**🌊 流量日变化曲线**")
+                flow_values = []
+                for h in range(24):
+                    val = st.slider(
+                        f"{h:02d}:00",
+                        min_value=0.5, max_value=2.0,
+                        value=float(influent.diurnal_flow_curve[h]),
+                        step=0.05,
+                        key=f"flow_{h}",
+                    )
+                    flow_values.append(val)
+                influent.diurnal_flow_curve = np.array(flow_values)
+            
+            with col_conc:
+                st.markdown("**🔬 浓度日变化曲线**")
+                conc_values = []
+                for h in range(24):
+                    val = st.slider(
+                        f"{h:02d}:00",
+                        min_value=0.5, max_value=2.0,
+                        value=float(influent.diurnal_curve[h]),
+                        step=0.05,
+                        key=f"conc_{h}",
+                    )
+                    conc_values.append(val)
+                influent.diurnal_curve = np.array(conc_values)
     
     fig = plot_influent_diurnal(influent)
     st.plotly_chart(fig, use_container_width=True)
@@ -667,21 +831,47 @@ def page_steady_state():
         )
         tolerance = st.number_input(
             "收敛阈值",
-            min_value=1e-10, max_value=1e-4,
+            min_value=1e-10, max_value=1e-2,
             value=float(config.tolerance),
-            step=1e-8,
+            step=1e-7,
             format="%.1e",
+            help="当残差范数小于此值时判定为收敛",
         )
         relaxation = st.number_input(
             "松弛因子",
             min_value=0.1, max_value=1.0,
             value=float(config.relaxation),
             step=0.1,
+            help="Newton迭代的松弛因子，较小值更稳定但收敛更慢",
         )
+        
+        use_engineering = st.checkbox(
+            "启用工程收敛标准",
+            value=config.use_engineering_tolerance,
+            help="允许在残差较大但工程可接受的情况下判定为收敛",
+        )
+        
+        eng_factor = 50000.0
+        if use_engineering:
+            eng_factor = st.slider(
+                "工程容差倍数",
+                min_value=1000.0, max_value=200000.0,
+                value=float(config.engineering_tolerance_factor),
+                step=1000.0,
+                help=f"工程收敛阈值 = 收敛阈值 × 倍数，当前: {tolerance * eng_factor:.2e}",
+            )
         
         config.max_iterations = max_iter
         config.tolerance = tolerance
         config.relaxation = relaxation
+        config.use_engineering_tolerance = use_engineering
+        config.engineering_tolerance_factor = eng_factor
+        
+        st.info(f"""
+        **收敛标准说明:**
+        - 严格收敛: 残差 < {tolerance:.2e}
+        {'- 工程收敛: 残差 < ' + f'{tolerance * eng_factor:.2e}' if use_engineering else ''}
+        """)
     
     with col2:
         st.subheader("排放标准")
