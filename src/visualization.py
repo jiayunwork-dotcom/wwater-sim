@@ -533,3 +533,281 @@ def plot_residual_convergence(steady_result: SteadyStateResult) -> go.Figure:
     )
     
     return fig
+
+
+def plot_process_comparison(comparison_result: 'ProcessComparisonResult') -> go.Figure:
+    """
+    绘制两套工艺方案的出水水质对比柱状图
+    
+    参数:
+        comparison_result: 工艺对比结果
+    
+    返回:
+        Plotly Figure
+    """
+    from .analysis import ProcessComparisonResult
+    
+    indicators = ['COD', 'BOD5', 'NH3_N', 'TN', 'TP', 'SS']
+    display_names = ['COD', 'BOD5', 'NH3-N', 'TN', 'TP', 'SS']
+    
+    scheme1_values = []
+    scheme2_values = []
+    
+    for ind in indicators:
+        val1 = comparison_result.result1.effluent_quality.get(ind, 0) if comparison_result.result1 and comparison_result.result1.converged else 0
+        val2 = comparison_result.result2.effluent_quality.get(ind, 0) if comparison_result.result2 and comparison_result.result2.converged else 0
+        scheme1_values.append(val1)
+        scheme2_values.append(val2)
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Bar(
+        name=comparison_result.name1,
+        x=display_names,
+        y=scheme1_values,
+        marker_color='#1f77b4',
+        text=[f'{v:.2f}' for v in scheme1_values],
+        textposition='auto',
+    ))
+    
+    fig.add_trace(go.Bar(
+        name=comparison_result.name2,
+        x=display_names,
+        y=scheme2_values,
+        marker_color='#ff7f0e',
+        text=[f'{v:.2f}' for v in scheme2_values],
+        textposition='auto',
+    ))
+    
+    fig.update_layout(
+        title='两套工艺方案出水水质对比',
+        xaxis_title='水质指标',
+        yaxis_title='浓度 (mg/L)',
+        barmode='group',
+        height=500,
+        legend=dict(orientation='h', yanchor='bottom', y=-0.2),
+        hovermode='x unified',
+    )
+    
+    return fig
+
+
+def plot_srt_vs_sludge(srt_values: List[float], 
+                        sludge_values: List[float],
+                        current_srt: Optional[float] = None,
+                        current_sludge: Optional[float] = None,
+                        converged_list: Optional[List[bool]] = None) -> go.Figure:
+    """
+    绘制SRT与污泥产量的关系曲线
+    
+    参数:
+        srt_values: SRT取值列表
+        sludge_values: 对应污泥产量列表
+        current_srt: 当前运行工况的SRT
+        current_sludge: 当前工况的污泥产量
+        converged_list: 各点收敛情况
+    
+    返回:
+        Plotly Figure
+    """
+    fig = go.Figure()
+    
+    valid_srt = []
+    valid_sludge = []
+    invalid_srt = []
+    invalid_sludge = []
+    
+    if converged_list is not None:
+        for srt, sludge, conv in zip(srt_values, sludge_values, converged_list):
+            if conv and not np.isnan(sludge):
+                valid_srt.append(srt)
+                valid_sludge.append(sludge)
+            else:
+                invalid_srt.append(srt)
+                invalid_sludge.append(sludge)
+    else:
+        for srt, sludge in zip(srt_values, sludge_values):
+            if not np.isnan(sludge):
+                valid_srt.append(srt)
+                valid_sludge.append(sludge)
+    
+    fig.add_trace(go.Scatter(
+        x=valid_srt, y=valid_sludge,
+        mode='lines+markers',
+        name='污泥产量',
+        line=dict(color='#27ae60', width=3),
+        marker=dict(size=10, color='#27ae60'),
+        fill='tozeroy',
+        fillcolor='rgba(39, 174, 96, 0.2)',
+    ))
+    
+    if len(invalid_srt) > 0:
+        fig.add_trace(go.Scatter(
+            x=invalid_srt, y=invalid_sludge,
+            mode='markers',
+            name='未收敛',
+            marker=dict(size=10, color='red', symbol='x'),
+        ))
+    
+    if current_srt is not None and current_sludge is not None:
+        fig.add_trace(go.Scatter(
+            x=[current_srt], y=[current_sludge],
+            mode='markers',
+            name='当前工况',
+            marker=dict(size=15, color='#e74c3c', symbol='star', line=dict(color='white', width=2)),
+        ))
+        
+        fig.add_annotation(
+            x=current_srt, y=current_sludge,
+            text=f'当前: SRT={current_srt:.1f}天<br>产泥={current_sludge:.1f} kg/d',
+            showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=2,
+            ax=-100, ay=-50,
+            bgcolor='rgba(231, 76, 60, 0.9)',
+            font=dict(color='white', size=12),
+        )
+    
+    fig.update_layout(
+        title='SRT与剩余污泥产量的关系',
+        xaxis_title='污泥停留时间 SRT (天)',
+        yaxis_title='剩余污泥产量 (kg DS/d)',
+        height=500,
+        hovermode='x unified',
+        legend=dict(orientation='h', yanchor='bottom', y=-0.2),
+        annotations=[
+            dict(
+                x=0.95, y=0.95,
+                xref='paper', yref='paper',
+                text='💡 SRT越长，污泥产量越低<br>但硝化效果越好，能耗越高',
+                showarrow=False,
+                align='right',
+                bgcolor='rgba(255, 255, 255, 0.9)',
+                bordercolor='#cccccc',
+                borderwidth=1,
+                font=dict(size=11),
+            )
+        ]
+    )
+    
+    return fig
+
+
+def plot_energy_pie(energy_result: 'EnergyConsumptionResult') -> go.Figure:
+    """
+    绘制能耗分项饼图
+    
+    参数:
+        energy_result: 能耗估算结果
+    
+    返回:
+        Plotly Figure
+    """
+    from .analysis import EnergyConsumptionResult
+    
+    labels = ['曝气系统', '回流泵', '内回流泵', '搅拌系统', '其他']
+    values = [
+        energy_result.aeration_kwh_d,
+        energy_result.return_pump_kwh_d,
+        energy_result.internal_pump_kwh_d,
+        energy_result.mixing_kwh_d,
+        energy_result.other_kwh_d,
+    ]
+    
+    colors = ['#e74c3c', '#3498db', '#9b59b6', '#f39c12', '#95a5a6']
+    
+    fig = go.Figure(data=[go.Pie(
+        labels=labels,
+        values=values,
+        hole=0.4,
+        marker_colors=colors,
+        textinfo='label+percent',
+        texttemplate='%{label}<br>%{percent:.1%}<br>%{value:.1f} kWh/d',
+        hovertemplate='%{label}<br>能耗: %{value:.1f} kWh/d<br>占比: %{percent:.1%}<extra></extra>',
+    )])
+    
+    fig.update_layout(
+        title='系统能耗分项占比',
+        height=500,
+        annotations=[
+            dict(
+                text=f'总能耗<br>{energy_result.total_kwh_d:.1f} kWh/d',
+                x=0.5, y=0.5,
+                font_size=16,
+                showarrow=False,
+            )
+        ]
+    )
+    
+    return fig
+
+
+def plot_srt_vs_energy(srt_values: List[float],
+                        energy_values: List[float],
+                        current_srt: Optional[float] = None,
+                        current_energy: Optional[float] = None,
+                        converged_list: Optional[List[bool]] = None) -> go.Figure:
+    """
+    绘制SRT与能耗的关系曲线
+    
+    参数:
+        srt_values: SRT取值列表
+        energy_values: 对应能耗列表
+        current_srt: 当前运行工况的SRT
+        current_energy: 当前工况的能耗
+        converged_list: 各点收敛情况
+    
+    返回:
+        Plotly Figure
+    """
+    fig = go.Figure()
+    
+    valid_srt = []
+    valid_energy = []
+    
+    if converged_list is not None:
+        for srt, energy, conv in zip(srt_values, energy_values, converged_list):
+            if conv and not np.isnan(energy):
+                valid_srt.append(srt)
+                valid_energy.append(energy)
+    else:
+        for srt, energy in zip(srt_values, energy_values):
+            if not np.isnan(energy):
+                valid_srt.append(srt)
+                valid_energy.append(energy)
+    
+    fig.add_trace(go.Scatter(
+        x=valid_srt, y=valid_energy,
+        mode='lines+markers',
+        name='能耗',
+        line=dict(color='#e67e22', width=3),
+        marker=dict(size=10, color='#e67e22'),
+        fill='tozeroy',
+        fillcolor='rgba(230, 126, 34, 0.2)',
+    ))
+    
+    if current_srt is not None and current_energy is not None:
+        fig.add_trace(go.Scatter(
+            x=[current_srt], y=[current_energy],
+            mode='markers',
+            name='当前工况',
+            marker=dict(size=15, color='#e74c3c', symbol='star', line=dict(color='white', width=2)),
+        ))
+        
+        fig.add_annotation(
+            x=current_srt, y=current_energy,
+            text=f'当前: SRT={current_srt:.1f}天<br>能耗={current_energy:.1f} kWh/d',
+            showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=2,
+            ax=-100, ay=-50,
+            bgcolor='rgba(231, 76, 60, 0.9)',
+            font=dict(color='white', size=12),
+        )
+    
+    fig.update_layout(
+        title='SRT与系统能耗的关系',
+        xaxis_title='污泥停留时间 SRT (天)',
+        yaxis_title='系统能耗 (kWh/d)',
+        height=500,
+        hovermode='x unified',
+        legend=dict(orientation='h', yanchor='bottom', y=-0.2),
+    )
+    
+    return fig

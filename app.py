@@ -66,6 +66,25 @@ from src.visualization import (
     plot_sensitivity_curves,
     plot_two_factor_heatmap,
     plot_residual_convergence,
+    plot_process_comparison,
+    plot_srt_vs_sludge,
+    plot_srt_vs_energy,
+    plot_energy_pie,
+)
+from src.analysis import (
+    calculate_sludge_production,
+    calculate_energy_consumption,
+    generate_srt_vs_sludge_curve,
+    SludgeProductionResult,
+    EnergyConsumptionResult,
+    ProcessComparisonResult,
+)
+from src.report_generator import (
+    ReportData,
+    generate_html_report,
+    generate_pdf_report,
+    get_download_link_html,
+    generate_timestamp_filename,
 )
 
 
@@ -139,6 +158,42 @@ def init_session_state():
     
     if 'diurnal_flow_curve' not in st.session_state:
         st.session_state.diurnal_flow_curve = np.ones(24)
+    
+    if 'sludge_result' not in st.session_state:
+        st.session_state.sludge_result = None
+    
+    if 'energy_result' not in st.session_state:
+        st.session_state.energy_result = None
+    
+    if 'srt_sludge_curve' not in st.session_state:
+        st.session_state.srt_sludge_curve = None
+    
+    if 'comparison_result' not in st.session_state:
+        st.session_state.comparison_result = None
+    
+    if 'comparison_pfs1' not in st.session_state:
+        st.session_state.comparison_pfs1 = None
+    
+    if 'comparison_pfs2' not in st.session_state:
+        st.session_state.comparison_pfs2 = None
+    
+    if 'comparison_influent1' not in st.session_state:
+        st.session_state.comparison_influent1 = None
+    
+    if 'comparison_influent2' not in st.session_state:
+        st.session_state.comparison_influent2 = None
+    
+    if 'comparison_params1' not in st.session_state:
+        st.session_state.comparison_params1 = None
+    
+    if 'comparison_params2' not in st.session_state:
+        st.session_state.comparison_params2 = None
+    
+    if 'comparison_name1' not in st.session_state:
+        st.session_state.comparison_name1 = "方案1"
+    
+    if 'comparison_name2' not in st.session_state:
+        st.session_state.comparison_name2 = "方案2"
 
 
 def page_home():
@@ -1049,6 +1104,21 @@ def page_steady_state():
                     st.session_state.compliance_result,
                 )
                 
+                Q = st.session_state.influent.Q_base
+                st.session_state.sludge_result = calculate_sludge_production(
+                    st.session_state.pfs,
+                    result.reactor_states,
+                    Q,
+                    st.session_state.asm1_params,
+                )
+                
+                st.session_state.energy_result = calculate_energy_consumption(
+                    st.session_state.pfs,
+                    result.reactor_states,
+                    st.session_state.influent,
+                    st.session_state.asm1_params,
+                )
+                
                 progress_bar.progress(1.0)
                 status_text.text("求解完成！")
             else:
@@ -1154,6 +1224,533 @@ def page_steady_state():
                         'SS': wq['SS'],
                     })
                 st.dataframe(pd.DataFrame(reactor_data), hide_index=True, use_container_width=True)
+        
+        if result.converged:
+            st.markdown("---")
+            st.subheader("📦 污泥产量分析")
+            
+            if st.session_state.sludge_result is not None:
+                sludge = st.session_state.sludge_result
+                
+                col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+                with col_s1:
+                    st.metric("日剩余污泥产量", f"{sludge.daily_sludge_kg:.1f}", "kg DS/d")
+                with col_s2:
+                    st.metric("平均MLSS", f"{sludge.MLSS_gL:.2f}", "g/L")
+                with col_s3:
+                    st.metric("系统总生物量", f"{sludge.total_biomass_kg:.0f}", "kg")
+                with col_s4:
+                    st.metric("异养菌/自养菌", f"{sludge.XBH_kg:.0f} / {sludge.XBA_kg:.0f}", "kg")
+                
+                with st.expander("📊 查看污泥组成详情", expanded=False):
+                    sludge_detail_data = [
+                        {'组分': '异养菌 (XBH)', '质量 (kg)': sludge.XBH_kg, '占比 (%)': round(sludge.XBH_kg / sludge.total_biomass_kg * 100, 1) if sludge.total_biomass_kg > 0 else 0},
+                        {'组分': '自养菌 (XBA)', '质量 (kg)': sludge.XBA_kg, '占比 (%)': round(sludge.XBA_kg / sludge.total_biomass_kg * 100, 1) if sludge.total_biomass_kg > 0 else 0},
+                        {'组分': '代谢产物 (XP)', '质量 (kg)': sludge.XP_kg, '占比 (%)': round(sludge.XP_kg / sludge.total_biomass_kg * 100, 1) if sludge.total_biomass_kg > 0 else 0},
+                        {'组分': '惰性颗粒 (XI)', '质量 (kg)': sludge.XI_kg, '占比 (%)': round(sludge.XI_kg / sludge.total_biomass_kg * 100, 1) if sludge.total_biomass_kg > 0 else 0},
+                        {'组分': '缓慢降解 (XS)', '质量 (kg)': sludge.XS_kg, '占比 (%)': round(sludge.XS_kg / sludge.total_biomass_kg * 100, 1) if sludge.total_biomass_kg > 0 else 0},
+                    ]
+                    st.dataframe(pd.DataFrame(sludge_detail_data), hide_index=True, use_container_width=True)
+                    
+                    st.info(f"""
+                    💡 **污泥处理提示**:
+                    - 日产量: {sludge.daily_sludge_kg:.1f} kg DS/d ≈ {sludge.daily_sludge_kg/1000:.3f} 吨/天
+                    - 年产量: {sludge.daily_sludge_kg * 365 / 1000:.1f} 吨/年
+                    - 污泥浓度: {sludge.sludge_concentration_mgL:.0f} mg/L = {sludge.sludge_concentration_mgL/1000:.1f} g/L
+                    """)
+                
+                if st.button("📈 生成SRT-污泥产量关系曲线", use_container_width=True):
+                    with st.spinner("正在计算SRT-污泥产量曲线..."):
+                        srt_range, sludge_values, converged_list = generate_srt_vs_sludge_curve(
+                            st.session_state.pfs,
+                            st.session_state.influent,
+                            st.session_state.asm1_params,
+                            config=st.session_state.solver_config,
+                        )
+                        st.session_state.srt_sludge_curve = (srt_range, sludge_values, converged_list)
+                        st.success("曲线生成完成！")
+                
+                if st.session_state.srt_sludge_curve is not None:
+                    srt_range, sludge_values, converged_list = st.session_state.srt_sludge_curve
+                    
+                    current_srt = 0.0
+                    srt_count = 0
+                    for reactor in st.session_state.pfs.reactors:
+                        if reactor.is_biological() and hasattr(reactor.operation, 'SRT') and reactor.operation.SRT > 0:
+                            current_srt += reactor.operation.SRT
+                            srt_count += 1
+                    current_srt = current_srt / srt_count if srt_count > 0 else 10.0
+                    
+                    fig_srt = plot_srt_vs_sludge(
+                        srt_range, sludge_values,
+                        current_srt=current_srt,
+                        current_sludge=sludge.daily_sludge_kg,
+                        converged_list=converged_list,
+                    )
+                    st.plotly_chart(fig_srt, use_container_width=True)
+            
+            st.markdown("---")
+            st.subheader("⚡ 能耗估算")
+            
+            if st.session_state.energy_result is not None:
+                energy = st.session_state.energy_result
+                
+                col_e1, col_e2, col_e3 = st.columns(3)
+                with col_e1:
+                    st.metric("日均总电耗", f"{energy.total_kwh_d:.1f}", "kWh/d")
+                with col_e2:
+                    st.metric("单位水量电耗", f"{energy.unit_kwh_m3:.4f}", "kWh/m³")
+                with col_e3:
+                    annual_cost = energy.total_kwh_d * 365 * 0.8
+                    st.metric("估算年电费", f"{annual_cost/10000:.1f}", "万元/年 (0.8元/kWh)")
+                
+                col_pie, col_table = st.columns(2)
+                
+                with col_pie:
+                    fig_pie = plot_energy_pie(energy)
+                    st.plotly_chart(fig_pie, use_container_width=True)
+                
+                with col_table:
+                    st.markdown("**能耗分项明细**")
+                    energy_detail_data = [
+                        {'分项': '曝气系统', '能耗 (kWh/d)': energy.aeration_kwh_d, '占比 (%)': round(energy.aeration_kwh_d / energy.total_kwh_d * 100, 1) if energy.total_kwh_d > 0 else 0},
+                        {'分项': '回流泵', '能耗 (kWh/d)': energy.return_pump_kwh_d, '占比 (%)': round(energy.return_pump_kwh_d / energy.total_kwh_d * 100, 1) if energy.total_kwh_d > 0 else 0},
+                        {'分项': '内回流泵', '能耗 (kWh/d)': energy.internal_pump_kwh_d, '占比 (%)': round(energy.internal_pump_kwh_d / energy.total_kwh_d * 100, 1) if energy.total_kwh_d > 0 else 0},
+                        {'分项': '搅拌系统', '能耗 (kWh/d)': energy.mixing_kwh_d, '占比 (%)': round(energy.mixing_kwh_d / energy.total_kwh_d * 100, 1) if energy.total_kwh_d > 0 else 0},
+                        {'分项': '其他', '能耗 (kWh/d)': energy.other_kwh_d, '占比 (%)': round(energy.other_kwh_d / energy.total_kwh_d * 100, 1) if energy.total_kwh_d > 0 else 0},
+                    ]
+                    st.dataframe(pd.DataFrame(energy_detail_data), hide_index=True, use_container_width=True)
+                    
+                    st.info(f"""
+                    💡 **节能提示**:
+                    - 曝气系统占比最大 ({energy.aeration_kwh_d / energy.total_kwh_d * 100:.0f}%)，可通过优化DO设定节能
+                    - 当前单位水量电耗 {energy.unit_kwh_m3:.4f} kWh/m³，处于{ '较低' if energy.unit_kwh_m3 < 0.3 else '中等' if energy.unit_kwh_m3 < 0.6 else '较高' }水平
+                    """)
+            
+            st.markdown("---")
+            st.subheader("📄 报告导出")
+            
+            col_export1, col_export2 = st.columns(2)
+            
+            with col_export1:
+                export_format = st.radio("导出格式", ["HTML", "PDF"], horizontal=True)
+                include_charts = st.checkbox("包含图表", value=True)
+            
+            with col_export2:
+                st.markdown("")
+                st.markdown("")
+                if st.button("📥 生成并下载报告", type="primary", use_container_width=True):
+                    with st.spinner(f"正在生成{export_format}报告..."):
+                        try:
+                            process_name = st.session_state.current_page
+                            if process_name == "🎯 稳态求解":
+                                process_name = "A2O工艺"
+                            
+                            report_data = ReportData(
+                                pfs=st.session_state.pfs,
+                                influent=st.session_state.influent,
+                                asm1_params=st.session_state.asm1_params,
+                                steady_result=result,
+                                compliance_result=st.session_state.compliance_result,
+                                optimization_suggestions=st.session_state.optimization_suggestions,
+                                sludge_result=st.session_state.sludge_result,
+                                energy_result=st.session_state.energy_result,
+                                process_name=process_name,
+                                standard_name=st.session_state.selected_standard,
+                            )
+                            
+                            if export_format == "HTML":
+                                html_content, filename = generate_html_report(report_data, include_charts=include_charts)
+                                download_link = get_download_link_html(html_content, filename, 'html')
+                                st.success(f"✅ HTML报告生成成功！")
+                                st.markdown(download_link, unsafe_allow_html=True)
+                                
+                                st.download_button(
+                                    label="💾 直接下载HTML报告",
+                                    data=html_content,
+                                    file_name=filename,
+                                    mime="text/html",
+                                    use_container_width=True,
+                                )
+                            else:
+                                try:
+                                    pdf_bytes, filename = generate_pdf_report(report_data, include_charts=include_charts)
+                                    st.success(f"✅ PDF报告生成成功！")
+                                    
+                                    st.download_button(
+                                        label="💾 直接下载PDF报告",
+                                        data=pdf_bytes,
+                                        file_name=filename,
+                                        mime="application/pdf",
+                                        use_container_width=True,
+                                    )
+                                except ImportError as e:
+                                    st.warning(f"⚠️ PDF导出需要安装额外依赖: {str(e)}")
+                                    st.info("将自动生成HTML格式报告")
+                                    html_content, filename = generate_html_report(report_data, include_charts=include_charts)
+                                    st.download_button(
+                                        label="💾 下载HTML报告",
+                                        data=html_content,
+                                        file_name=filename,
+                                        mime="text/html",
+                                        use_container_width=True,
+                                    )
+                                except Exception as e:
+                                    st.error(f"PDF生成失败: {str(e)}，将使用HTML格式")
+                                    html_content, filename = generate_html_report(report_data, include_charts=include_charts)
+                                    st.download_button(
+                                        label="💾 下载HTML报告",
+                                        data=html_content,
+                                        file_name=filename,
+                                        mime="text/html",
+                                        use_container_width=True,
+                                    )
+                        except Exception as e:
+                            st.error(f"报告生成失败: {str(e)}")
+            
+            st.info("📋 报告包含: 工艺流程配置、进水水质、ASM1参数、稳态求解结果、各池浓度分布、污泥产量、能耗分析、优化建议")
+
+
+def page_process_comparison():
+    """工艺对比页面"""
+    st.title("🔍 工艺方案对比")
+    st.markdown("---")
+    
+    st.info("💡 **操作说明**: 分别配置两套工艺方案，点击运行求解后，系统将自动对比两套方案的出水水质、污泥产量和能耗。")
+    
+    col_scheme1, col_scheme2 = st.columns(2)
+    
+    with col_scheme1:
+        st.markdown("### 🟦 方案 1")
+        scheme1_name = st.text_input("方案1名称", value=st.session_state.comparison_name1, key="s1_name")
+        st.session_state.comparison_name1 = scheme1_name
+        
+        st.markdown("**快速配置**")
+        col1_1, col1_2 = st.columns(2)
+        with col1_1:
+            if st.button("📋 复制当前工艺", key="copy_s1", use_container_width=True):
+                st.session_state.comparison_pfs1 = copy.deepcopy(st.session_state.pfs)
+                st.session_state.comparison_influent1 = copy.deepcopy(st.session_state.influent)
+                st.session_state.comparison_params1 = copy.deepcopy(st.session_state.asm1_params)
+                st.success("已复制当前工艺配置到方案1")
+        
+        with col1_2:
+            template1 = st.selectbox(
+                "工艺模板",
+                ["A2O", "SBR", "MBR"],
+                key="template_s1",
+                label_visibility="collapsed",
+            )
+            if st.button("🔄 加载模板", key="load_s1", use_container_width=True):
+                from src.process_templates import create_process_by_name
+                st.session_state.comparison_pfs1 = create_process_by_name(template1)
+                st.session_state.comparison_influent1 = copy.deepcopy(st.session_state.influent)
+                st.session_state.comparison_params1 = copy.deepcopy(st.session_state.asm1_params)
+                st.success(f"已加载{template1}工艺到方案1")
+        
+        if st.session_state.comparison_pfs1 is not None:
+            with st.expander("⚙️ 方案1参数调整", expanded=False):
+                st.markdown("**好氧池DO设定**")
+                do1 = st.slider("DO (mg/L)", 0.5, 5.0, 2.0, 0.1, key="do_s1")
+                
+                st.markdown("**污泥停留时间SRT**")
+                srt1 = st.slider("SRT (天)", 3, 40, 15, 1, key="srt_s1")
+                
+                st.markdown("**内回流比**")
+                irr1 = st.slider("内回流比 (%)", 0, 500, 200, 50, key="irr_s1")
+                
+                st.markdown("**好氧池HRT**")
+                hrt1 = st.slider("好氧池HRT (小时)", 2, 24, 8, 1, key="hrt_s1")
+                
+                if st.button("应用参数", key="apply_s1", use_container_width=True):
+                    for reactor in st.session_state.comparison_pfs1.reactors:
+                        if reactor.reactor_type == ReactorType.AEROBIC:
+                            reactor.operation.DO_setpoint = do1
+                        if hasattr(reactor.operation, 'SRT') and reactor.operation.SRT > 0:
+                            reactor.operation.SRT = srt1
+                        if hasattr(reactor.operation, 'internal_return_ratio'):
+                            reactor.operation.internal_return_ratio = irr1 / 100.0
+                        if reactor.reactor_type == ReactorType.AEROBIC:
+                            V = st.session_state.comparison_influent1.Q_base * hrt1 / 24
+                            reactor.geometry.volume = V
+                            reactor.operation.HRT = hrt1
+                    st.success("参数已应用到方案1")
+            
+            if st.session_state.comparison_pfs1 is not None:
+                pfs1 = st.session_state.comparison_pfs1
+                st.info(f"""
+                **方案1配置摘要**:
+                - 处理单元: {len(pfs1.reactors)} 个
+                - 总容积: {pfs1.get_volume():.0f} m³
+                - 工艺类型: {template1 if 'template1' in locals() else '自定义'}
+                """)
+    
+    with col_scheme2:
+        st.markdown("### 🟧 方案 2")
+        scheme2_name = st.text_input("方案2名称", value=st.session_state.comparison_name2, key="s2_name")
+        st.session_state.comparison_name2 = scheme2_name
+        
+        st.markdown("**快速配置**")
+        col2_1, col2_2 = st.columns(2)
+        with col2_1:
+            if st.button("📋 复制当前工艺", key="copy_s2", use_container_width=True):
+                st.session_state.comparison_pfs2 = copy.deepcopy(st.session_state.pfs)
+                st.session_state.comparison_influent2 = copy.deepcopy(st.session_state.influent)
+                st.session_state.comparison_params2 = copy.deepcopy(st.session_state.asm1_params)
+                st.success("已复制当前工艺配置到方案2")
+        
+        with col2_2:
+            template2 = st.selectbox(
+                "工艺模板",
+                ["A2O", "SBR", "MBR"],
+                index=0,
+                key="template_s2",
+                label_visibility="collapsed",
+            )
+            if st.button("🔄 加载模板", key="load_s2", use_container_width=True):
+                from src.process_templates import create_process_by_name
+                st.session_state.comparison_pfs2 = create_process_by_name(template2)
+                st.session_state.comparison_influent2 = copy.deepcopy(st.session_state.influent)
+                st.session_state.comparison_params2 = copy.deepcopy(st.session_state.asm1_params)
+                st.success(f"已加载{template2}工艺到方案2")
+        
+        if st.session_state.comparison_pfs2 is not None:
+            with st.expander("⚙️ 方案2参数调整", expanded=False):
+                st.markdown("**好氧池DO设定**")
+                do2 = st.slider("DO (mg/L)", 0.5, 5.0, 3.0, 0.1, key="do_s2")
+                
+                st.markdown("**污泥停留时间SRT**")
+                srt2 = st.slider("SRT (天)", 3, 40, 20, 1, key="srt_s2")
+                
+                st.markdown("**内回流比**")
+                irr2 = st.slider("内回流比 (%)", 0, 500, 250, 50, key="irr_s2")
+                
+                st.markdown("**好氧池HRT**")
+                hrt2 = st.slider("好氧池HRT (小时)", 2, 24, 10, 1, key="hrt_s2")
+                
+                if st.button("应用参数", key="apply_s2", use_container_width=True):
+                    for reactor in st.session_state.comparison_pfs2.reactors:
+                        if reactor.reactor_type == ReactorType.AEROBIC:
+                            reactor.operation.DO_setpoint = do2
+                        if hasattr(reactor.operation, 'SRT') and reactor.operation.SRT > 0:
+                            reactor.operation.SRT = srt2
+                        if hasattr(reactor.operation, 'internal_return_ratio'):
+                            reactor.operation.internal_return_ratio = irr2 / 100.0
+                        if reactor.reactor_type == ReactorType.AEROBIC:
+                            V = st.session_state.comparison_influent2.Q_base * hrt2 / 24
+                            reactor.geometry.volume = V
+                            reactor.operation.HRT = hrt2
+                    st.success("参数已应用到方案2")
+            
+            if st.session_state.comparison_pfs2 is not None:
+                pfs2 = st.session_state.comparison_pfs2
+                st.info(f"""
+                **方案2配置摘要**:
+                - 处理单元: {len(pfs2.reactors)} 个
+                - 总容积: {pfs2.get_volume():.0f} m³
+                - 工艺类型: {template2 if 'template2' in locals() else '自定义'}
+                """)
+    
+    st.markdown("---")
+    
+    col_ready1, col_ready2, col_run = st.columns([1, 1, 1])
+    
+    ready1 = st.session_state.comparison_pfs1 is not None and st.session_state.comparison_influent1 is not None
+    ready2 = st.session_state.comparison_pfs2 is not None and st.session_state.comparison_influent2 is not None
+    
+    with col_ready1:
+        if ready1:
+            st.success(f"✅ {scheme1_name} 已就绪")
+        else:
+            st.warning(f"⚠️ {scheme1_name} 未配置")
+    
+    with col_ready2:
+        if ready2:
+            st.success(f"✅ {scheme2_name} 已就绪")
+        else:
+            st.warning(f"⚠️ {scheme2_name} 未配置")
+    
+    with col_run:
+        if st.button("🚀 运行双方案对比求解", 
+                    type="primary", 
+                    use_container_width=True,
+                    disabled=not (ready1 and ready2)):
+            with st.spinner("正在并行求解两套工艺方案..."):
+                result1 = solve_steady_state(
+                    st.session_state.comparison_pfs1,
+                    st.session_state.comparison_influent1,
+                    st.session_state.comparison_params1,
+                    st.session_state.solver_config,
+                )
+                
+                result2 = solve_steady_state(
+                    st.session_state.comparison_pfs2,
+                    st.session_state.comparison_influent2,
+                    st.session_state.comparison_params2,
+                    st.session_state.solver_config,
+                )
+                
+                compliance1 = check_compliance(result1.effluent_quality, st.session_state.selected_standard) if result1.converged else None
+                compliance2 = check_compliance(result2.effluent_quality, st.session_state.selected_standard) if result2.converged else None
+                
+                sludge1 = calculate_sludge_production(
+                    st.session_state.comparison_pfs1,
+                    result1.reactor_states,
+                    st.session_state.comparison_influent1.Q_base,
+                    st.session_state.comparison_params1,
+                ) if result1.converged else None
+                
+                sludge2 = calculate_sludge_production(
+                    st.session_state.comparison_pfs2,
+                    result2.reactor_states,
+                    st.session_state.comparison_influent2.Q_base,
+                    st.session_state.comparison_params2,
+                ) if result2.converged else None
+                
+                energy1 = calculate_energy_consumption(
+                    st.session_state.comparison_pfs1,
+                    result1.reactor_states,
+                    st.session_state.comparison_influent1,
+                    st.session_state.comparison_params1,
+                ) if result1.converged else None
+                
+                energy2 = calculate_energy_consumption(
+                    st.session_state.comparison_pfs2,
+                    result2.reactor_states,
+                    st.session_state.comparison_influent2,
+                    st.session_state.comparison_params2,
+                ) if result2.converged else None
+                
+                st.session_state.comparison_result = ProcessComparisonResult(
+                    name1=scheme1_name,
+                    name2=scheme2_name,
+                    result1=result1,
+                    result2=result2,
+                    compliance1=compliance1,
+                    compliance2=compliance2,
+                    sludge1=sludge1,
+                    sludge2=sludge2,
+                    energy1=energy1,
+                    energy2=energy2,
+                )
+                
+                st.success("对比求解完成！")
+    
+    if st.session_state.comparison_result is not None:
+        comp = st.session_state.comparison_result
+        
+        st.markdown("---")
+        st.subheader("📊 对比结果")
+        
+        col_status1, col_status2 = st.columns(2)
+        with col_status1:
+            if comp.result1 and comp.result1.converged:
+                st.success(f"✅ {comp.name1}: 收敛")
+            else:
+                st.error(f"❌ {comp.name1}: 未收敛")
+        
+        with col_status2:
+            if comp.result2 and comp.result2.converged:
+                st.success(f"✅ {comp.name2}: 收敛")
+            else:
+                st.error(f"❌ {comp.name2}: 未收敛")
+        
+        if comp.result1.converged and comp.result2.converged:
+            st.markdown("### 📈 出水水质对比")
+            
+            fig_comp = plot_process_comparison(comp)
+            st.plotly_chart(fig_comp, use_container_width=True)
+            
+            st.markdown("### 📋 详细对比表")
+            comp_df = comp.get_comparison_table()
+            
+            def highlight_better(row):
+                styles = [''] * len(row)
+                try:
+                    val1 = float(str(row['方案1 (mg/L)']))
+                    val2 = float(str(row['方案2 (mg/L)']))
+                    if val2 < val1:
+                        styles[2] = 'background-color: #d4edda'
+                        styles[3] = 'background-color: #d4edda'
+                        styles[4] = 'background-color: #d4edda'
+                    elif val1 < val2:
+                        styles[1] = 'background-color: #d4edda'
+                except:
+                    pass
+                return styles
+            
+            st.dataframe(
+                comp_df.style.apply(highlight_better, axis=1),
+                hide_index=True,
+                use_container_width=True,
+            )
+            
+            st.markdown("### 📦 污泥产量对比")
+            if comp.sludge1 is not None and comp.sludge2 is not None:
+                col_sl1, col_sl2, col_sl3 = st.columns(3)
+                with col_sl1:
+                    st.metric(f"{comp.name1} 产泥量", 
+                              f"{comp.sludge1.daily_sludge_kg:.1f} kg/d",
+                              f"{comp.sludge1.MLSS_gL:.2f} g/L MLSS")
+                with col_sl2:
+                    st.metric(f"{comp.name2} 产泥量", 
+                              f"{comp.sludge2.daily_sludge_kg:.1f} kg/d",
+                              f"{comp.sludge2.MLSS_gL:.2f} g/L MLSS")
+                with col_sl3:
+                    diff = comp.sludge2.daily_sludge_kg - comp.sludge1.daily_sludge_kg
+                    pct = diff / comp.sludge1.daily_sludge_kg * 100 if comp.sludge1.daily_sludge_kg > 0 else 0
+                    st.metric("产泥量差异", 
+                              f"{diff:+.1f} kg/d",
+                              f"{pct:+.1f}%")
+            
+            st.markdown("### ⚡ 能耗对比")
+            if comp.energy1 is not None and comp.energy2 is not None:
+                col_en1, col_en2, col_en3 = st.columns(3)
+                with col_en1:
+                    st.metric(f"{comp.name1} 电耗", 
+                              f"{comp.energy1.total_kwh_d:.1f} kWh/d",
+                              f"{comp.energy1.unit_kwh_m3:.4f} kWh/m³")
+                with col_en2:
+                    st.metric(f"{comp.name2} 电耗", 
+                              f"{comp.energy2.total_kwh_d:.1f} kWh/d",
+                              f"{comp.energy2.unit_kwh_m3:.4f} kWh/m³")
+                with col_en3:
+                    diff = comp.energy2.total_kwh_d - comp.energy1.total_kwh_d
+                    pct = diff / comp.energy1.total_kwh_d * 100 if comp.energy1.total_kwh_d > 0 else 0
+                    st.metric("电耗差异", 
+                              f"{diff:+.1f} kWh/d",
+                              f"{pct:+.1f}%")
+                
+                col_pie1, col_pie2 = st.columns(2)
+                with col_pie1:
+                    st.markdown(f"**{comp.name1} 能耗分项**")
+                    fig1 = plot_energy_pie(comp.energy1)
+                    st.plotly_chart(fig1, use_container_width=True)
+                with col_pie2:
+                    st.markdown(f"**{comp.name2} 能耗分项**")
+                    fig2 = plot_energy_pie(comp.energy2)
+                    st.plotly_chart(fig2, use_container_width=True)
+            
+            st.markdown("### ✅ 达标情况对比")
+            if comp.compliance1 is not None and comp.compliance2 is not None:
+                col_comp1, col_comp2 = st.columns(2)
+                with col_comp1:
+                    st.markdown(f"**{comp.name1}**")
+                    if comp.compliance1.overall_compliant:
+                        st.success("🎉 全面达标")
+                    else:
+                        fail_items = [item.name for item in comp.compliance1.items if not item.compliant]
+                        st.error(f"⚠️ 超标指标: {', '.join(fail_items)}")
+                
+                with col_comp2:
+                    st.markdown(f"**{comp.name2}**")
+                    if comp.compliance2.overall_compliant:
+                        st.success("🎉 全面达标")
+                    else:
+                        fail_items = [item.name for item in comp.compliance2.items if not item.compliant]
+                        st.error(f"⚠️ 超标指标: {', '.join(fail_items)}")
+            
+            st.info("💡 **建议**: 综合考虑出水水质、污泥产量和能耗，选择最优方案。通常提高DO和延长SRT可改善出水水质，但会增加能耗和降低污泥产量。")
 
 
 def page_dynamic():
@@ -1726,6 +2323,7 @@ def main():
             "🌊 进水配置": page_influent_config,
             "⚗️ 参数管理": page_parameters,
             "🎯 稳态求解": page_steady_state,
+            "🔍 工艺对比": page_process_comparison,
             "📈 动态仿真": page_dynamic,
             "📊 敏感性分析": page_sensitivity,
             "💡 优化建议": page_optimization,

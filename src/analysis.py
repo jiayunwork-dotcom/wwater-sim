@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple, Optional, Callable
 import copy
 import pandas as pd
 
-from .asm1_model import ASM1Parameters, aggregate_to_wq_indices
+from .asm1_model import ASM1Parameters, aggregate_to_wq_indices, COMPONENT_INDEX
 from .reactor_units import ProcessFlowSheet, ReactorType
 from .process_templates import InfluentConfig
 from .solver import solve_steady_state, SolverConfig, SteadyStateResult
@@ -533,3 +533,356 @@ def generate_optimization_suggestions(
     suggestions.sort(key=lambda x: x.priority)
     
     return suggestions
+
+
+@dataclass
+class SludgeProductionResult:
+    """污泥产量计算结果"""
+    daily_sludge_kg: float
+    sludge_concentration_mgL: float
+    waste_flow_m3d: float
+    XBH_kg: float
+    XBA_kg: float
+    XP_kg: float
+    XI_kg: float
+    XS_kg: float
+    total_biomass_kg: float
+    MLSS_gL: float
+    details: Dict = field(default_factory=dict)
+
+
+def calculate_sludge_production(
+    pfs: ProcessFlowSheet,
+    reactor_states: List[np.ndarray],
+    Q: float,
+    params: ASM1Parameters,
+) -> SludgeProductionResult:
+    """
+    计算每日剩余污泥产量
+    
+    基于各池中异养菌XBH和自养菌XBA的浓度以及二沉池的排泥量
+    
+    参数:
+        pfs: 工艺流程
+        reactor_states: 各反应器稳态浓度
+        Q: 日均流量 (m³/day)
+        params: ASM1参数
+    
+    返回:
+        SludgeProductionResult
+    """
+    XBH_idx = COMPONENT_INDEX['XBH']
+    XBA_idx = COMPONENT_INDEX['XBA']
+    XP_idx = COMPONENT_INDEX['XP']
+    XI_idx = COMPONENT_INDEX['XI']
+    XS_idx = COMPONENT_INDEX['XS']
+    
+    solid_indices = [XI_idx, XS_idx, XBH_idx, XBA_idx, XP_idx]
+    
+    total_volume = 0.0
+    XBH_total_kg = 0.0
+    XBA_total_kg = 0.0
+    XP_total_kg = 0.0
+    XI_total_kg = 0.0
+    XS_total_kg = 0.0
+    MLSS_total = 0.0
+    MLSS_count = 0
+    
+    for reactor, state in zip(pfs.reactors, reactor_states):
+        V = reactor.geometry.volume
+        
+        if reactor.is_biological():
+            total_volume += V
+            
+            XBH_total_kg += state[XBH_idx] * V / 1000
+            XBA_total_kg += state[XBA_idx] * V / 1000
+            XP_total_kg += state[XP_idx] * V / 1000
+            XI_total_kg += state[XI_idx] * V / 1000
+            XS_total_kg += state[XS_idx] * V / 1000
+            
+            MLSS = sum(state[idx] for idx in solid_indices) * 0.75
+            MLSS_total += MLSS
+            MLSS_count += 1
+    
+    MLSS_avg = MLSS_total / MLSS_count if MLSS_count > 0 else 0
+    
+    SRT_avg = 0.0
+    srt_count = 0
+    for reactor in pfs.reactors:
+        if reactor.is_biological() and hasattr(reactor.operation, 'SRT') and reactor.operation.SRT > 0:
+            SRT_avg += reactor.operation.SRT
+            srt_count += 1
+    SRT_avg = SRT_avg / srt_count if srt_count > 0 else 10.0
+    
+    total_biomass_kg = XBH_total_kg + XBA_total_kg + XP_total_kg + XI_total_kg + XS_total_kg
+    
+    daily_sludge_kg = total_biomass_kg / SRT_avg if SRT_avg > 0 else 0
+    
+    secondary_idx = None
+    for i, reactor in enumerate(pfs.reactors):
+        if reactor.reactor_type == ReactorType.SECONDARY:
+            secondary_idx = i
+            break
+    
+    sludge_concentration_mgL = 0.0
+    waste_flow_m3d = 0.0
+    
+    if secondary_idx is not None:
+        sec_state = reactor_states[secondary_idx]
+        sludge_concentration_mgL = sum(sec_state[idx] for idx in solid_indices) * 0.75
+        R = pfs.reactors[secondary_idx].operation.return_sludge_ratio
+        waste_flow_m3d = Q / 100.0
+    
+    if sludge_concentration_mgL < 5000:
+        sludge_concentration_mgL = 8000
+    
+    return SludgeProductionResult(
+        daily_sludge_kg=round(daily_sludge_kg, 2),
+        sludge_concentration_mgL=round(sludge_concentration_mgL, 1),
+        waste_flow_m3d=round(waste_flow_m3d, 2),
+        XBH_kg=round(XBH_total_kg, 2),
+        XBA_kg=round(XBA_total_kg, 2),
+        XP_kg=round(XP_total_kg, 2),
+        XI_kg=round(XI_total_kg, 2),
+        XS_kg=round(XS_total_kg, 2),
+        total_biomass_kg=round(total_biomass_kg, 2),
+        MLSS_gL=round(MLSS_avg / 1000, 2),
+        details={
+            'SRT_avg': SRT_avg,
+            'total_volume': total_volume,
+            'Q': Q,
+        }
+    )
+
+
+def generate_srt_vs_sludge_curve(
+    pfs: ProcessFlowSheet,
+    influent: InfluentConfig,
+    params: ASM1Parameters,
+    srt_range: Optional[List[float]] = None,
+    config: Optional[SolverConfig] = None,
+) -> Tuple[List[float], List[float], List[bool]]:
+    """
+    生成SRT与污泥产量的关系曲线
+    
+    参数:
+        pfs: 工艺流程
+        influent: 进水配置
+        params: ASM1参数
+        srt_range: SRT取值范围（默认5-30天，步长5天）
+        config: 求解器配置
+    
+    返回:
+        (srt_values, sludge_productions, converged_list)
+    """
+    if config is None:
+        config = SolverConfig()
+    
+    if srt_range is None:
+        srt_range = [5, 8, 10, 12, 15, 20, 25, 30]
+    
+    Q = influent.Q_base
+    sludge_results = []
+    converged_list = []
+    
+    for srt in srt_range:
+        pfs_copy = copy.deepcopy(pfs)
+        for reactor in pfs_copy.reactors:
+            if hasattr(reactor.operation, 'SRT'):
+                reactor.operation.SRT = srt
+        
+        result = solve_steady_state(pfs_copy, influent, params, config)
+        converged_list.append(result.converged)
+        
+        if result.converged:
+            sludge = calculate_sludge_production(
+                pfs_copy, result.reactor_states, Q, params
+            )
+            sludge_results.append(sludge.daily_sludge_kg)
+        else:
+            sludge_results.append(np.nan)
+    
+    return srt_range, sludge_results, converged_list
+
+
+@dataclass
+class EnergyConsumptionResult:
+    """能耗估算结果"""
+    total_kwh_d: float
+    aeration_kwh_d: float
+    return_pump_kwh_d: float
+    internal_pump_kwh_d: float
+    mixing_kwh_d: float
+    other_kwh_d: float
+    unit_kwh_m3: float
+    details: Dict = field(default_factory=dict)
+
+
+def calculate_energy_consumption(
+    pfs: ProcessFlowSheet,
+    reactor_states: List[np.ndarray],
+    influent: InfluentConfig,
+    params: ASM1Parameters,
+) -> EnergyConsumptionResult:
+    """
+    估算整个工艺系统的日均电耗
+    
+    参数:
+        pfs: 工艺流程
+        reactor_states: 各反应器稳态浓度
+        influent: 进水配置
+        params: ASM1参数
+    
+    返回:
+        EnergyConsumptionResult
+    """
+    from .asm1_model import calculate_process_rates
+    
+    Q = influent.Q_base
+    Q_hourly = Q / 24
+    
+    aeration_kwh_d = 0.0
+    return_pump_kwh_d = 0.0
+    internal_pump_kwh_d = 0.0
+    mixing_kwh_d = 0.0
+    other_kwh_d = 0.0
+    
+    OTE = 0.25
+    SOTE = 0.10
+    air_density = 1.2
+    oxygen_in_air = 0.232
+    
+    XBH_idx = COMPONENT_INDEX['XBH']
+    XBA_idx = COMPONENT_INDEX['XBA']
+    SS_idx = COMPONENT_INDEX['SS']
+    SNH_idx = COMPONENT_INDEX['SNH']
+    
+    for reactor, state in zip(pfs.reactors, reactor_states):
+        V = reactor.geometry.volume
+        
+        if reactor.reactor_type == ReactorType.AEROBIC:
+            C_in = None
+            for i, r in enumerate(pfs.reactors):
+                if r is reactor and i > 0:
+                    C_in = reactor_states[i-1]
+                    break
+            if C_in is None:
+                C_in = state
+            
+            rates = calculate_process_rates(
+                state, params, 
+                DO_setpoint=reactor.operation.DO_setpoint,
+                is_anoxic=False
+            )
+            
+            XBH = state[XBH_idx]
+            XBA = state[XBA_idx]
+            SS = state[SS_idx]
+            SNH = state[SNH_idx]
+            
+            mu_H = params.mu_H * (SS / (params.K_S + SS))
+            OUR_heterotrophic = (1 - params.Y_H) / params.Y_H * mu_H * XBH
+            
+            mu_A = params.mu_A * (SNH / (params.K_NH + SNH))
+            OUR_autotrophic = (4.57 - params.Y_A) / params.Y_A * mu_A * XBA
+            
+            b_H = params.b_H
+            b_A = params.b_A
+            OUR_endogenous = b_H * XBH * 0.5 + b_A * XBA * 0.5
+            
+            OUR_total = OUR_heterotrophic + OUR_autotrophic + OUR_endogenous
+            
+            oxygen_mass_kg_d = OUR_total * V * 24 / 1000
+            air_mass_kg_d = oxygen_mass_kg_d / SOTE / oxygen_in_air
+            air_volume_m3_d = air_mass_kg_d / air_density
+            
+            blower_efficiency = 0.7
+            pressure_ratio = 1.5
+            specific_power = 0.004
+            aeration_power = air_volume_m3_d * specific_power / 24
+            aeration_kwh_d = aeration_power * 24
+            
+            if aeration_kwh_d < 50:
+                aeration_kwh_d = max(aeration_kwh_d, V * 0.05)
+        
+        if reactor.is_biological() and reactor.is_anoxic():
+            mixing_power_per_m3 = 0.008
+            mixing_kwh_d += V * mixing_power_per_m3 * 24
+        
+        if reactor.reactor_type == ReactorType.SECONDARY:
+            R = reactor.operation.return_sludge_ratio
+            Q_r = R * Q
+            head_m = 8.0
+            pump_efficiency = 0.75
+            density_water = 1000
+            g = 9.81
+            return_pump_power = (Q_r * density_water * g * head_m) / (pump_efficiency * 3.6e6) * 24
+            return_pump_kwh_d = max(return_pump_power, 20)
+    
+    for reactor in pfs.reactors:
+        if hasattr(reactor.operation, 'internal_return_ratio') and reactor.operation.internal_return_ratio > 0:
+            IR = reactor.operation.internal_return_ratio
+            Q_ir = IR * Q
+            head_m = 3.0
+            pump_efficiency = 0.75
+            density_water = 1000
+            g = 9.81
+            internal_pump_power = (Q_ir * density_water * g * head_m) / (pump_efficiency * 3.6e6) * 24
+            internal_pump_kwh_d = max(internal_pump_power, 15)
+    
+    other_kwh_d = Q * 0.001
+    total_kwh_d = aeration_kwh_d + return_pump_kwh_d + internal_pump_kwh_d + mixing_kwh_d + other_kwh_d
+    unit_kwh_m3 = total_kwh_d / Q if Q > 0 else 0
+    
+    return EnergyConsumptionResult(
+        total_kwh_d=round(total_kwh_d, 2),
+        aeration_kwh_d=round(aeration_kwh_d, 2),
+        return_pump_kwh_d=round(return_pump_kwh_d, 2),
+        internal_pump_kwh_d=round(internal_pump_kwh_d, 2),
+        mixing_kwh_d=round(mixing_kwh_d, 2),
+        other_kwh_d=round(other_kwh_d, 2),
+        unit_kwh_m3=round(unit_kwh_m3, 4),
+        details={
+            'Q': Q,
+            'OTE': OTE,
+            'SOTE': SOTE,
+        }
+    )
+
+
+@dataclass
+class ProcessComparisonResult:
+    """工艺对比结果"""
+    name1: str
+    name2: str
+    result1: Optional[SteadyStateResult]
+    result2: Optional[SteadyStateResult]
+    compliance1: Optional[ComplianceResult]
+    compliance2: Optional[ComplianceResult]
+    sludge1: Optional[SludgeProductionResult]
+    sludge2: Optional[SludgeProductionResult]
+    energy1: Optional[EnergyConsumptionResult]
+    energy2: Optional[EnergyConsumptionResult]
+    
+    def get_comparison_table(self) -> pd.DataFrame:
+        """生成对比表格"""
+        indicators = ['COD', 'BOD5', 'NH3_N', 'TN', 'TP', 'SS']
+        display_names = ['COD', 'BOD5', 'NH3-N', 'TN', 'TP', 'SS']
+        
+        data = []
+        for ind, name in zip(indicators, display_names):
+            val1 = self.result1.effluent_quality.get(ind, 0) if self.result1 and self.result1.converged else np.nan
+            val2 = self.result2.effluent_quality.get(ind, 0) if self.result2 and self.result2.converged else np.nan
+            diff = val2 - val1 if not np.isnan(val1) and not np.isnan(val2) else np.nan
+            improvement = (val1 - val2) / val1 * 100 if not np.isnan(val1) and not np.isnan(val2) and val1 > 0 else np.nan
+            
+            data.append({
+                '指标': name,
+                '方案1 (mg/L)': round(val1, 2) if not np.isnan(val1) else '-',
+                '方案2 (mg/L)': round(val2, 2) if not np.isnan(val2) else '-',
+                '差值 (mg/L)': round(diff, 2) if not np.isnan(diff) else '-',
+                '改善率 (%)': round(improvement, 1) if not np.isnan(improvement) else '-',
+            })
+        
+        return pd.DataFrame(data)
+
