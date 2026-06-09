@@ -5,11 +5,14 @@
 
 import json
 import os
+import logging
 import shutil
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field, asdict
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from .nsga2_optimizer import (
     OptimizationConfig,
@@ -190,6 +193,17 @@ class OptimizationHistoryRecord:
     max_generations_snapshot: int = 100
 
 
+class _NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+
 def save_optimization_result(result: OptimizationResult) -> str:
     _ensure_history_dir()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -203,19 +217,21 @@ def save_optimization_result(result: OptimizationResult) -> str:
         'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         'config': _config_to_dict(result.config),
         'pareto_front': pareto_dicts,
-        'best_fitness_history': result.best_fitness_history,
-        'avg_fitness_history': result.avg_fitness_history,
-        'total_evaluations': result.total_evaluations,
-        'was_aborted': result.was_aborted,
+        'best_fitness_history': [float(v) for v in result.best_fitness_history],
+        'avg_fitness_history': [float(v) for v in result.avg_fitness_history],
+        'total_evaluations': int(result.total_evaluations),
+        'was_aborted': bool(result.was_aborted),
         'objective_names': obj_names,
-        'population_size_snapshot': result.config.population_size,
-        'max_generations_snapshot': result.config.max_generations,
+        'population_size_snapshot': int(result.config.population_size),
+        'max_generations_snapshot': int(result.config.max_generations),
         'pareto_count': len(result.pareto_front),
     }
 
     filepath = os.path.join(HISTORY_DIR, f"{record_id}.json")
+    logger.info(f"Saving optimization result to: {filepath}")
     with open(filepath, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2, cls=_NumpyEncoder)
+    logger.info(f"Optimization result saved successfully: {record_id}")
 
     return record_id
 

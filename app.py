@@ -120,6 +120,22 @@ st.set_page_config(
 )
 
 
+class _OptSharedState:
+    def __init__(self):
+        self.running = False
+        self.progress = 0.0
+        self.current_gen = 0
+        self.max_gen = 100
+        self.best_fitness = 0.0
+        self.avg_fitness = 0.0
+        self.status = ""
+        self.result = None
+        self.error = None
+        self.aborted = False
+        self.history_saved_id = None
+        self.completion_handled = False
+
+
 def init_session_state():
     """初始化会话状态"""
     if 'pfs' not in st.session_state:
@@ -225,14 +241,8 @@ def init_session_state():
     if 'optimization_result' not in st.session_state:
         st.session_state.optimization_result = None
     
-    if 'optimization_running' not in st.session_state:
-        st.session_state.optimization_running = False
-    
-    if 'optimization_aborted' not in st.session_state:
-        st.session_state.optimization_aborted = False
-    
-    if 'optimization_progress' not in st.session_state:
-        st.session_state.optimization_progress = 0.0
+    if '_opt_shared' not in st.session_state:
+        st.session_state._opt_shared = _OptSharedState()
     
     if 'optimization_optimizer' not in st.session_state:
         st.session_state.optimization_optimizer = None
@@ -243,26 +253,8 @@ def init_session_state():
     if 'optimization_color_by' not in st.session_state:
         st.session_state.optimization_color_by = 'sludge'
     
-    if 'optimization_current_gen' not in st.session_state:
-        st.session_state.optimization_current_gen = 0
-    
-    if 'optimization_max_gen' not in st.session_state:
-        st.session_state.optimization_max_gen = 100
-    
-    if 'optimization_best_fitness' not in st.session_state:
-        st.session_state.optimization_best_fitness = 0.0
-    
-    if 'optimization_avg_fitness' not in st.session_state:
-        st.session_state.optimization_avg_fitness = 0.0
-    
-    if 'optimization_status' not in st.session_state:
-        st.session_state.optimization_status = ""
-    
     if 'optimization_config_copy' not in st.session_state:
         st.session_state.optimization_config_copy = None
-    
-    if 'optimization_error' not in st.session_state:
-        st.session_state.optimization_error = None
     
     if 'optimization_history_loaded' not in st.session_state:
         st.session_state.optimization_history_loaded = None
@@ -2553,11 +2545,13 @@ def page_multiobjective_optimization():
     
     col_run, col_stop, col_status = st.columns([1, 1, 2])
     
+    shared = st.session_state._opt_shared
+    
     with col_run:
         if st.button("🚀 开始优化", 
                     type="primary", 
                     use_container_width=True,
-                    disabled=st.session_state.optimization_running):
+                    disabled=shared.running):
             
             if len(opt_config.variables) == 0:
                 st.error("请至少选择一个决策变量！")
@@ -2568,15 +2562,20 @@ def page_multiobjective_optimization():
                 opt_config_copy.population_size = int(pop_size)
                 opt_config_copy.max_generations = int(max_gen)
                 
-                st.session_state.optimization_running = True
-                st.session_state.optimization_aborted = False
-                st.session_state.optimization_progress = 0.0
+                shared.running = True
+                shared.progress = 0.0
+                shared.current_gen = 0
+                shared.max_gen = opt_config_copy.max_generations
+                shared.best_fitness = 0.0
+                shared.avg_fitness = 0.0
+                shared.status = "初始化中..."
+                shared.result = None
+                shared.error = None
+                shared.aborted = False
+                shared.history_saved_id = None
+                shared.completion_handled = False
+                
                 st.session_state.optimization_result = None
-                st.session_state.optimization_current_gen = 0
-                st.session_state.optimization_max_gen = opt_config_copy.max_generations
-                st.session_state.optimization_best_fitness = 0.0
-                st.session_state.optimization_avg_fitness = 0.0
-                st.session_state.optimization_status = "初始化中..."
                 
                 optimizer = NSGA2Optimizer(
                     config=opt_config_copy,
@@ -2591,38 +2590,37 @@ def page_multiobjective_optimization():
                 
                 import threading
                 
-                def run_optimization():
+                def run_optimization(_shared, _optimizer):
                     def progress_callback(current_gen, max_gen, best_fitness, avg_fitness):
                         progress = current_gen / max_gen if max_gen > 0 else 0
-                        st.session_state.optimization_progress = progress
-                        st.session_state.optimization_current_gen = current_gen
-                        st.session_state.optimization_max_gen = max_gen
-                        st.session_state.optimization_best_fitness = best_fitness
-                        st.session_state.optimization_avg_fitness = avg_fitness
-                        st.session_state.optimization_status = f"迭代 {current_gen}/{max_gen} | 最优: {best_fitness:.2f} | 平均: {avg_fitness:.2f}"
+                        _shared.progress = progress
+                        _shared.current_gen = current_gen
+                        _shared.max_gen = max_gen
+                        _shared.best_fitness = best_fitness
+                        _shared.avg_fitness = avg_fitness
+                        _shared.status = f"迭代 {current_gen}/{max_gen} | 最优: {best_fitness:.2f} | 平均: {avg_fitness:.2f}"
                     
                     def stop_check():
-                        return st.session_state.optimization_aborted
+                        return _shared.aborted
                     
                     try:
-                        result = optimizer.optimize(
+                        result = _optimizer.optimize(
                             progress_callback=progress_callback,
                             stop_check_callback=stop_check,
                         )
-                        st.session_state.optimization_result = result
-                        st.session_state.optimization_status = "优化完成！"
-                        try:
-                            record_id = save_optimization_result(result)
-                            st.session_state.optimization_history_saved_id = record_id
-                        except Exception:
-                            st.session_state.optimization_history_saved_id = None
+                        _shared.result = result
+                        _shared.status = "优化完成！"
                     except Exception as e:
-                        st.session_state.optimization_error = str(e)
-                        st.session_state.optimization_status = f"出错: {str(e)}"
+                        _shared.error = str(e)
+                        _shared.status = f"出错: {str(e)}"
                     finally:
-                        st.session_state.optimization_running = False
+                        _shared.running = False
                 
-                optimization_thread = threading.Thread(target=run_optimization, daemon=True)
+                optimization_thread = threading.Thread(
+                    target=run_optimization,
+                    args=(shared, optimizer),
+                    daemon=True,
+                )
                 optimization_thread.start()
                 st.rerun()
     
@@ -2630,37 +2628,50 @@ def page_multiobjective_optimization():
         if st.button("⏹️ 终止优化", 
                     type="secondary", 
                     use_container_width=True,
-                    disabled=not st.session_state.optimization_running):
-            st.session_state.optimization_aborted = True
+                    disabled=not shared.running):
+            shared.aborted = True
             if st.session_state.optimization_optimizer is not None:
                 st.session_state.optimization_optimizer.stop()
             st.rerun()
     
     with col_status:
-        if st.session_state.optimization_running:
-            progress = st.session_state.optimization_progress
-            current_gen = st.session_state.get('optimization_current_gen', 0)
-            max_gen = st.session_state.get('optimization_max_gen', opt_config.max_generations)
-            best_fitness = st.session_state.get('optimization_best_fitness', 0.0)
-            avg_fitness = st.session_state.get('optimization_avg_fitness', 0.0)
-            status = st.session_state.get('optimization_status', '初始化中...')
-            
-            st.progress(min(progress, 1.0))
-            st.info(f"🔄 {status}")
+        if shared.running:
+            st.progress(min(shared.progress, 1.0))
+            st.info(f"🔄 {shared.status}")
             
             import time
-            time.sleep(0.5)
+            time.sleep(1.0)
+            st.rerun()
+        elif not shared.running and shared.result is not None and not shared.completion_handled:
+            shared.completion_handled = True
+            st.session_state.optimization_result = shared.result
+            
+            try:
+                record_id = save_optimization_result(shared.result)
+                shared.history_saved_id = record_id
+            except Exception as save_err:
+                shared.history_saved_id = None
+            
+            result = shared.result
+            if result.was_aborted:
+                st.warning(f"⚠️ 优化已提前终止，完成 {len(result.all_populations)-1}/{shared.max_gen} 代")
+            else:
+                st.success(f"✅ 优化完成！共评估 {result.total_evaluations} 个方案，获得 {len(result.pareto_front)} 个Pareto最优解")
+            
+            if shared.history_saved_id:
+                st.toast(f"✅ 优化结果已自动保存 (ID: {shared.history_saved_id})")
+            
             st.rerun()
         elif st.session_state.optimization_result is not None:
             result = st.session_state.optimization_result
             if result.was_aborted:
-                st.warning(f"⚠️ 优化已提前终止，完成 {len(result.all_populations)-1}/{st.session_state.optimization_max_gen} 代")
+                st.warning(f"⚠️ 优化已提前终止，完成 {len(result.all_populations)-1}/{shared.max_gen} 代")
             else:
                 st.success(f"✅ 优化完成！共评估 {result.total_evaluations} 个方案，获得 {len(result.pareto_front)} 个Pareto最优解")
-        elif 'optimization_error' in st.session_state and st.session_state.optimization_error is not None:
-            st.error(f"❌ 优化出错: {st.session_state.optimization_error}")
+        elif shared.error is not None:
+            st.error(f"❌ 优化出错: {shared.error}")
     
-    if st.session_state.optimization_running:
+    if shared.running:
         st.info("💡 优化过程中每代需要对种群中每个个体调用稳态求解器进行仿真计算，"
                 "种群50、迭代100代约需要5-10分钟，请耐心等待。可随时点击终止按钮停止优化。")
     
@@ -2947,9 +2958,6 @@ def page_multiobjective_optimization():
             - 如果最看重出水水质，可选择TN/氨氮最低的方案
             - 如果需要平衡多个目标，可选择综合评分最优的方案
             """)
-    
-    if st.session_state.get('optimization_history_saved_id'):
-        st.toast(f"✅ 优化结果已自动保存 (ID: {st.session_state.optimization_history_saved_id})")
     
     st.markdown("---")
     st.subheader("📁 优化历史管理")
