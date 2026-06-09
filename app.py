@@ -73,6 +73,8 @@ from src.visualization import (
     plot_pareto_front,
     plot_convergence_curve,
     plot_objective_parallel_coordinates,
+    plot_sensitivity_heatmap,
+    plot_solution_comparison,
 )
 from src.nsga2_optimizer import (
     NSGA2Optimizer,
@@ -85,6 +87,13 @@ from src.nsga2_optimizer import (
     DEFAULT_OBJECTIVES,
     get_default_config,
     calculate_composite_score,
+)
+from src.optimization_history import (
+    save_optimization_result,
+    list_optimization_history,
+    load_optimization_history,
+    delete_optimization_history,
+    OptimizationHistoryRecord,
 )
 from src.analysis import (
     calculate_sludge_production,
@@ -254,6 +263,21 @@ def init_session_state():
     
     if 'optimization_error' not in st.session_state:
         st.session_state.optimization_error = None
+    
+    if 'optimization_history_loaded' not in st.session_state:
+        st.session_state.optimization_history_loaded = None
+    
+    if 'comparison_history_a' not in st.session_state:
+        st.session_state.comparison_history_a = None
+    
+    if 'comparison_history_b' not in st.session_state:
+        st.session_state.comparison_history_b = None
+    
+    if 'comparison_solution_a' not in st.session_state:
+        st.session_state.comparison_solution_a = None
+    
+    if 'comparison_solution_b' not in st.session_state:
+        st.session_state.comparison_solution_b = None
 
 
 def page_home():
@@ -2587,6 +2611,11 @@ def page_multiobjective_optimization():
                         )
                         st.session_state.optimization_result = result
                         st.session_state.optimization_status = "优化完成！"
+                        try:
+                            record_id = save_optimization_result(result)
+                            st.session_state.optimization_history_saved_id = record_id
+                        except Exception:
+                            st.session_state.optimization_history_saved_id = None
                     except Exception as e:
                         st.session_state.optimization_error = str(e)
                         st.session_state.optimization_status = f"出错: {str(e)}"
@@ -2641,11 +2670,12 @@ def page_multiobjective_optimization():
         st.markdown("---")
         st.subheader("📊 优化结果")
         
-        tab1, tab2, tab3, tab4 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
             "📈 Pareto前沿", 
             "📋 方案推荐", 
             "📉 收敛曲线", 
-            "🎯 平行坐标"
+            "🎯 平行坐标",
+            "🔥 敏感性热力图",
         ])
         
         with tab1:
@@ -2884,6 +2914,18 @@ def page_multiobjective_optimization():
                    "每条线代表一个方案，颜色深浅表示TN浓度。"
                    "通过观察线条走势可以发现目标之间的权衡关系。")
         
+        with tab5:
+            st.markdown("### 参数敏感性热力图")
+            st.caption("基于Pareto前沿数据，计算决策变量与优化目标之间的Pearson相关系数，帮助理解哪个变量对哪个目标影响最大")
+            
+            fig_heatmap = plot_sensitivity_heatmap(result.pareto_front)
+            st.plotly_chart(fig_heatmap, use_container_width=True)
+            
+            st.info("💡 **热力图解读**: 颜色越深表示相关性越强。"
+                   "|r| > 0.7 为强相关，0.4-0.7 为中等相关，< 0.4 为弱相关。"
+                   "鼠标悬浮可查看具体Pearson相关系数和p值。"
+                   "p值 < 0.05 表示相关性具有统计显著性。")
+        
         st.markdown("---")
         st.subheader("💡 优化建议")
         
@@ -2905,6 +2947,328 @@ def page_multiobjective_optimization():
             - 如果最看重出水水质，可选择TN/氨氮最低的方案
             - 如果需要平衡多个目标，可选择综合评分最优的方案
             """)
+    
+    if st.session_state.get('optimization_history_saved_id'):
+        st.toast(f"✅ 优化结果已自动保存 (ID: {st.session_state.optimization_history_saved_id})")
+    
+    st.markdown("---")
+    st.subheader("📁 优化历史管理")
+    
+    history_records = list_optimization_history()
+    
+    if len(history_records) == 0:
+        st.info("暂无优化历史记录。完成一次优化后将自动保存结果。")
+    else:
+        st.markdown(f"共有 **{len(history_records)}** 条历史记录")
+        
+        hist_cols = st.columns([3, 1])
+        with hist_cols[1]:
+            if st.button("🗑️ 清空全部历史", use_container_width=True):
+                for rec in history_records:
+                    delete_optimization_history(rec['record_id'])
+                st.success("已清空全部历史记录")
+                st.rerun()
+        
+        history_data = []
+        for rec in history_records:
+            obj_str = ", ".join(rec.get('objective_names', []))
+            history_data.append({
+                '时间戳': rec['timestamp'],
+                '目标组合': obj_str,
+                '种群规模': rec['population_size_snapshot'],
+                '迭代代数': rec['max_generations_snapshot'],
+                'Pareto解数量': rec['pareto_count'],
+                'record_id': rec['record_id'],
+            })
+        
+        hist_df = pd.DataFrame(history_data)
+        
+        display_df = hist_df[['时间戳', '目标组合', '种群规模', '迭代代数', 'Pareto解数量']].copy()
+        st.dataframe(display_df, hide_index=True, use_container_width=True, height=min(300, 40 * len(history_data) + 40))
+        
+        col_load, col_del = st.columns(2)
+        
+        with col_load:
+            selected_record_id = st.selectbox(
+                "选择历史记录",
+                options=hist_df['record_id'].tolist(),
+                format_func=lambda x: next(
+                    (f"{r['时间戳']} | Pareto解: {r['Pareto解数量']}" 
+                     for _, r in hist_df.iterrows() if r['record_id'] == x), x
+                ),
+                key="opt_history_select",
+            )
+            
+            col_load_btn, col_del_btn = st.columns(2)
+            with col_load_btn:
+                if st.button("📂 加载选中记录", type="primary", use_container_width=True):
+                    loaded = load_optimization_history(selected_record_id)
+                    if loaded is not None:
+                        st.session_state.optimization_history_loaded = loaded
+                        st.success(f"已加载历史记录: {loaded.timestamp}")
+                    else:
+                        st.error("加载失败，记录可能已损坏")
+            
+            with col_del_btn:
+                if st.button("🗑️ 删除选中记录", use_container_width=True):
+                    if delete_optimization_history(selected_record_id):
+                        st.success("已删除")
+                        st.rerun()
+                    else:
+                        st.error("删除失败")
+        
+        loaded_record = st.session_state.optimization_history_loaded
+        if loaded_record is not None:
+            st.markdown("---")
+            st.markdown(f"#### 📊 历史记录: {loaded_record.timestamp}")
+            
+            col_h1, col_h2 = st.columns(2)
+            with col_h1:
+                fig_hist_pareto = plot_pareto_front(
+                    loaded_record.pareto_front, 
+                    color_by=st.session_state.optimization_color_by
+                )
+                st.plotly_chart(fig_hist_pareto, use_container_width=True)
+            
+            with col_h2:
+                if len(loaded_record.best_fitness_history) > 0:
+                    fig_hist_conv = plot_convergence_curve(
+                        loaded_record.best_fitness_history,
+                        loaded_record.avg_fitness_history,
+                    )
+                    st.plotly_chart(fig_hist_conv, use_container_width=True)
+                else:
+                    st.info("无收敛数据")
+            
+            fig_hist_heatmap = plot_sensitivity_heatmap(loaded_record.pareto_front)
+            st.plotly_chart(fig_hist_heatmap, use_container_width=True)
+    
+    st.markdown("---")
+    st.subheader("⚖️ 方案对比")
+    st.caption("从不同历史优化记录中各选一个方案进行并排对比")
+    
+    all_available_solutions = []
+    
+    if st.session_state.optimization_result is not None:
+        current_result = st.session_state.optimization_result
+        for idx, ind in enumerate(current_result.pareto_front):
+            if ind.converged:
+                all_available_solutions.append({
+                    'source': '当前优化',
+                    'index': idx,
+                    'individual': ind,
+                    'label': f"[当前优化] 方案{idx+1} | TN={ind.effluent_quality.get('TN', 0):.2f} | 能耗={ind.energy_result.total_kwh_d if ind.energy_result else 0:.1f}",
+                })
+    
+    for rec in history_records:
+        loaded_rec = load_optimization_history(rec['record_id'])
+        if loaded_rec is not None:
+            for idx, ind in enumerate(loaded_rec.pareto_front):
+                if ind.converged:
+                    all_available_solutions.append({
+                        'source': rec['timestamp'],
+                        'index': idx,
+                        'individual': ind,
+                        'label': f"[{rec['timestamp']}] 方案{idx+1} | TN={ind.effluent_quality.get('TN', 0):.2f} | 能耗={ind.energy_result.total_kwh_d if ind.energy_result else 0:.1f}",
+                    })
+    
+    if len(all_available_solutions) < 2:
+        st.info("需要至少2个可用方案才能进行对比。请先完成优化或加载历史记录。")
+    else:
+        labels = [s['label'] for s in all_available_solutions]
+        
+        col_sel_a, col_sel_b = st.columns(2)
+        
+        with col_sel_a:
+            sel_a_idx = st.selectbox(
+                "🟦 选择方案A",
+                options=list(range(len(all_available_solutions))),
+                format_func=lambda i: labels[i],
+                index=0,
+                key="compare_sel_a",
+            )
+        
+        with col_sel_b:
+            default_b = 1 if len(all_available_solutions) > 1 else 0
+            sel_b_idx = st.selectbox(
+                "🟧 选择方案B",
+                options=list(range(len(all_available_solutions))),
+                format_func=lambda i: labels[i],
+                index=default_b,
+                key="compare_sel_b",
+            )
+        
+        sol_a = all_available_solutions[sel_a_idx]['individual']
+        sol_b = all_available_solutions[sel_b_idx]['individual']
+        
+        fig_comp = plot_solution_comparison(sol_a, sol_b, "方案A", "方案B")
+        st.plotly_chart(fig_comp, use_container_width=True)
+        
+        st.markdown("### 📋 差异对比详情")
+        
+        var_display_names = ['好氧池DO (mg/L)', '内回流比 (%)', 'SRT (天)', '回流污泥比 (%)']
+        eff_display_names = ['COD (mg/L)', 'NH3-N (mg/L)', 'TN (mg/L)', 'TP (mg/L)']
+        
+        diff_rows = []
+        
+        for i, name in enumerate(var_display_names):
+            v_a = sol_a.variables[i] if i < len(sol_a.variables) else 0
+            v_b = sol_b.variables[i] if i < len(sol_b.variables) else 0
+            diff = v_b - v_a
+            
+            if abs(diff) < 0.001:
+                advantage = '➖ 持平'
+            elif diff > 0:
+                advantage = '⬆ 方案B更高'
+            else:
+                advantage = '⬆ 方案A更高'
+            
+            diff_rows.append({
+                '类别': '决策变量',
+                '指标': name,
+                '方案A': f"{v_a:.2f}",
+                '方案B': f"{v_b:.2f}",
+                '差异': f"{diff:+.2f}",
+                '优势方': advantage,
+            })
+        
+        effluent_keys = ['COD', 'NH3_N', 'TN', 'TP']
+        for i, (key, name) in enumerate(zip(effluent_keys, eff_display_names)):
+            v_a = sol_a.effluent_quality.get(key, 0)
+            v_b = sol_b.effluent_quality.get(key, 0)
+            diff = v_b - v_a
+            
+            if abs(diff) < 0.001:
+                advantage = '➖ 持平'
+            elif diff > 0:
+                advantage = '🟩A 🟥B'
+            else:
+                advantage = '🟥A 🟩B'
+            
+            diff_rows.append({
+                '类别': '出水指标',
+                '指标': name,
+                '方案A': f"{v_a:.2f}",
+                '方案B': f"{v_b:.2f}",
+                '差异': f"{diff:+.2f}",
+                '优势方': advantage,
+            })
+        
+        e_a = sol_a.energy_result.total_kwh_d if sol_a.energy_result else 0
+        e_b = sol_b.energy_result.total_kwh_d if sol_b.energy_result else 0
+        e_diff = e_b - e_a
+        
+        if abs(e_diff) < 0.1:
+            e_advantage = '➖ 持平'
+        elif e_diff > 0:
+            e_advantage = '🟩A 🟥B'
+        else:
+            e_advantage = '🟥A 🟩B'
+        
+        diff_rows.append({
+            '类别': '能耗与产泥',
+            '指标': '日均能耗 (kWh/d)',
+            '方案A': f"{e_a:.1f}",
+            '方案B': f"{e_b:.1f}",
+            '差异': f"{e_diff:+.1f}",
+            '优势方': e_advantage,
+        })
+        
+        s_a = sol_a.sludge_result.daily_sludge_kg if sol_a.sludge_result else 0
+        s_b = sol_b.sludge_result.daily_sludge_kg if sol_b.sludge_result else 0
+        s_diff = s_b - s_a
+        
+        if abs(s_diff) < 0.1:
+            s_advantage = '➖ 持平'
+        elif s_diff > 0:
+            s_advantage = '🟩A 🟥B'
+        else:
+            s_advantage = '🟥A 🟩B'
+        
+        diff_rows.append({
+            '类别': '能耗与产泥',
+            '指标': '日产泥量 (kg/d)',
+            '方案A': f"{s_a:.1f}",
+            '方案B': f"{s_b:.1f}",
+            '差异': f"{s_diff:+.1f}",
+            '优势方': s_advantage,
+        })
+        
+        diff_df = pd.DataFrame(diff_rows)
+        
+        def highlight_advantage(row):
+            adv = str(row.get('优势方', ''))
+            if '🟩' in adv and '🟥' in adv:
+                return ['background-color: #fff3cd'] * len(row)
+            elif '🟩' in adv:
+                return ['background-color: #d4edda'] * len(row)
+            elif '🟥' in adv:
+                return ['background-color: #f8d7da'] * len(row)
+            return [''] * len(row)
+        
+        st.dataframe(
+            diff_df.style.apply(highlight_advantage, axis=1),
+            hide_index=True,
+            use_container_width=True,
+        )
+        
+        st.markdown("### 📝 方案总结")
+        
+        a_better_effluent = []
+        b_better_effluent = []
+        a_better_cost = []
+        b_better_cost = []
+        
+        for key, name in zip(effluent_keys, eff_display_names):
+            v_a = sol_a.effluent_quality.get(key, 0)
+            v_b = sol_b.effluent_quality.get(key, 0)
+            if v_a < v_b:
+                a_better_effluent.append(name)
+            elif v_b < v_a:
+                b_better_effluent.append(name)
+        
+        if e_a < e_b:
+            a_better_cost.append(f"能耗更低 ({e_a:.1f} vs {e_b:.1f} kWh/d)")
+        elif e_b < e_a:
+            b_better_cost.append(f"能耗更低 ({e_b:.1f} vs {e_a:.1f} kWh/d)")
+        
+        if s_a < s_b:
+            a_better_cost.append(f"产泥量更少 ({s_a:.1f} vs {s_b:.1f} kg/d)")
+        elif s_b < s_a:
+            b_better_cost.append(f"产泥量更少 ({s_b:.1f} vs {s_a:.1f} kg/d)")
+        
+        summary_parts = []
+        if a_better_effluent or a_better_cost:
+            summary_parts.append(f"**方案A优势**: " + 
+                                ("出水指标更优: " + ", ".join(a_better_effluent) + "; " if a_better_effluent else "") +
+                                ("; ".join(a_better_cost) if a_better_cost else ""))
+        if b_better_effluent or b_better_cost:
+            summary_parts.append(f"**方案B优势**: " + 
+                                ("出水指标更优: " + ", ".join(b_better_effluent) + "; " if b_better_effluent else "") +
+                                ("; ".join(b_better_cost) if b_better_cost else ""))
+        
+        a_feasible = sol_a.is_feasible
+        b_feasible = sol_b.is_feasible
+        if a_feasible and not b_feasible:
+            summary_parts.append("**方案A** 满足排放标准约束，而**方案B**存在超标项")
+        elif b_feasible and not a_feasible:
+            summary_parts.append("**方案B** 满足排放标准约束，而**方案A**存在超标项")
+        elif a_feasible and b_feasible:
+            summary_parts.append("两个方案均满足排放标准约束")
+        else:
+            summary_parts.append("两个方案均存在超标项")
+        
+        for part in summary_parts:
+            st.markdown(f"- {part}")
+        
+        if a_better_effluent and b_better_cost:
+            st.info("💡 方案A在出水水质方面更有优势，方案B在运行成本方面更有优势，需根据实际优先级选择。")
+        elif b_better_effluent and a_better_cost:
+            st.info("💡 方案B在出水水质方面更有优势，方案A在运行成本方面更有优势，需根据实际优先级选择。")
+        elif a_better_effluent or a_better_cost:
+            st.success("💡 方案A在多个方面综合占优。")
+        elif b_better_effluent or b_better_cost:
+            st.success("💡 方案B在多个方面综合占优。")
 
 
 def main():

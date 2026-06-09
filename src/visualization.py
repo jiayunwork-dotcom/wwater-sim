@@ -1044,3 +1044,154 @@ def plot_objective_parallel_coordinates(pareto_front: List) -> go.Figure:
     )
     
     return fig
+
+
+def plot_sensitivity_heatmap(pareto_front: List) -> go.Figure:
+    """
+    绘制决策变量与目标值之间的Pearson相关性热力图
+
+    参数:
+        pareto_front: Pareto前沿个体列表
+
+    返回:
+        plotly Figure
+    """
+    from scipy import stats as scipy_stats
+    from .nsga2_optimizer import Individual
+
+    var_names = ['DO设定值', '内回流比', 'SRT', '回流污泥比']
+    obj_names = ['出水NH3-N', '出水TN', '日均能耗', '日产泥量']
+
+    converged = [ind for ind in pareto_front if ind.converged]
+    if len(converged) < 3:
+        fig = go.Figure()
+        fig.update_layout(
+            title='参数敏感性热力图 (数据不足)',
+            height=500,
+        )
+        return fig
+
+    var_data = np.array([ind.variables[:4] for ind in converged])
+    obj_data = []
+    for ind in converged:
+        nh3 = ind.effluent_quality.get('NH3_N', 0)
+        tn = ind.effluent_quality.get('TN', 0)
+        energy = ind.energy_result.total_kwh_d if ind.energy_result else 0
+        sludge = ind.sludge_result.daily_sludge_kg if ind.sludge_result else 0
+        obj_data.append([nh3, tn, energy, sludge])
+    obj_data = np.array(obj_data)
+
+    corr_matrix = np.zeros((4, 4))
+    p_matrix = np.zeros((4, 4))
+    raw_corr = np.zeros((4, 4))
+    for i in range(4):
+        for j in range(4):
+            r, p = scipy_stats.pearsonr(var_data[:, i], obj_data[:, j])
+            raw_corr[i, j] = r
+            corr_matrix[i, j] = abs(r)
+            p_matrix[i, j] = p
+
+    hover_text = []
+    for i in range(4):
+        row = []
+        for j in range(4):
+            row.append(
+                f"变量: {var_names[i]}<br>"
+                f"目标: {obj_names[j]}<br>"
+                f"Pearson r: {raw_corr[i, j]:.4f}<br>"
+                f"|r|: {corr_matrix[i, j]:.4f}<br>"
+                f"p值: {p_matrix[i, j]:.4e}"
+            )
+        hover_text.append(row)
+
+    fig = go.Figure(data=go.Heatmap(
+        z=corr_matrix,
+        x=obj_names,
+        y=var_names,
+        colorscale='Reds',
+        zmin=0,
+        zmax=1,
+        colorbar=dict(title='|Pearson r|'),
+        text=[[f"{corr_matrix[i, j]:.3f}<br>p={p_matrix[i, j]:.2e}" for j in range(4)] for i in range(4)],
+        texttemplate='%{text}',
+        textfont=dict(size=10),
+        hovertemplate='%{customdata}<extra></extra>',
+        customdata=hover_text,
+    ))
+
+    fig.update_layout(
+        title='决策变量与优化目标的相关性热力图',
+        xaxis_title='优化目标',
+        yaxis_title='决策变量',
+        height=500,
+        margin=dict(l=100, r=60, t=80, b=80),
+    )
+
+    return fig
+
+
+def plot_solution_comparison(ind1: 'Individual', ind2: 'Individual',
+                              name1: str = '方案A', name2: str = '方案B') -> go.Figure:
+    """
+    绘制两个方案的对比柱状图
+
+    参数:
+        ind1: 方案1个体
+        ind2: 方案2个体
+        name1: 方案1名称
+        name2: 方案2名称
+
+    返回:
+        plotly Figure
+    """
+    from .nsga2_optimizer import Individual
+
+    var_labels = ['DO (mg/L)', '内回流比 (%)', 'SRT (天)', '回流比 (%)']
+    var1 = ind1.variables[:4].tolist() if len(ind1.variables) >= 4 else list(ind1.variables) + [0] * (4 - len(ind1.variables))
+    var2 = ind2.variables[:4].tolist() if len(ind2.variables) >= 4 else list(ind2.variables) + [0] * (4 - len(ind2.variables))
+
+    effluent_labels = ['COD', 'NH3-N', 'TN', 'TP']
+    eff1 = [ind1.effluent_quality.get('COD', 0), ind1.effluent_quality.get('NH3_N', 0),
+            ind1.effluent_quality.get('TN', 0), ind1.effluent_quality.get('TP', 0)]
+    eff2 = [ind2.effluent_quality.get('COD', 0), ind2.effluent_quality.get('NH3_N', 0),
+            ind2.effluent_quality.get('TN', 0), ind2.effluent_quality.get('TP', 0)]
+
+    energy1 = ind1.energy_result.total_kwh_d if ind1.energy_result else 0
+    energy2 = ind2.energy_result.total_kwh_d if ind2.energy_result else 0
+    sludge1 = ind1.sludge_result.daily_sludge_kg if ind1.sludge_result else 0
+    sludge2 = ind2.sludge_result.daily_sludge_kg if ind2.sludge_result else 0
+
+    fig = make_subplots(
+        rows=1, cols=3,
+        subplot_titles=('决策变量对比', '出水指标对比 (mg/L)', '能耗与产泥量对比'),
+        horizontal_spacing=0.12,
+    )
+
+    fig.add_trace(go.Bar(name=name1, x=var_labels, y=var1, marker_color='#1f77b4',
+                         text=[f'{v:.2f}' for v in var1], textposition='auto'), row=1, col=1)
+    fig.add_trace(go.Bar(name=name2, x=var_labels, y=var2, marker_color='#ff7f0e',
+                         text=[f'{v:.2f}' for v in var2], textposition='auto'), row=1, col=1)
+
+    fig.add_trace(go.Bar(name=name1, x=effluent_labels, y=eff1, marker_color='#1f77b4',
+                         text=[f'{v:.2f}' for v in eff1], textposition='auto',
+                         showlegend=False), row=1, col=2)
+    fig.add_trace(go.Bar(name=name2, x=effluent_labels, y=eff2, marker_color='#ff7f0e',
+                         text=[f'{v:.2f}' for v in eff2], textposition='auto',
+                         showlegend=False), row=1, col=2)
+
+    es_labels = ['能耗 (kWh/d)', '产泥量 (kg/d)']
+    fig.add_trace(go.Bar(name=name1, x=es_labels, y=[energy1, sludge1], marker_color='#1f77b4',
+                         text=[f'{energy1:.1f}', f'{sludge1:.1f}'], textposition='auto',
+                         showlegend=False), row=1, col=3)
+    fig.add_trace(go.Bar(name=name2, x=es_labels, y=[energy2, sludge2], marker_color='#ff7f0e',
+                         text=[f'{energy2:.1f}', f'{sludge2:.1f}'], textposition='auto',
+                         showlegend=False), row=1, col=3)
+
+    fig.update_layout(
+        barmode='group',
+        height=500,
+        legend=dict(orientation='h', yanchor='bottom', y=-0.2),
+        title_text=f'{name1} vs {name2} 方案对比',
+    )
+
+    return fig
